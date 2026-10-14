@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Space Cadet",
+    "slug": "space-cadet",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "plugins": [
+      "expo-font",
+      "expo-status-bar",
+      "expo-audio",
+      "expo-asset",
+      "expo-image"
+    ]
+  }
+}
