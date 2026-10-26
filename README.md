@@ -21,8 +21,8 @@ A cognitive training app for future pilots and astronauts. Six competences, trai
 - **Home** — the Cadet Score, the three training cards (Daily Training, Daily Missions, Full Clearance), today's
   progress, streak, ranking and the week at a glance.
 - **Daily Training** — one game per competence each day, the same for everyone (seeded from the date). Each daily
-  game scores 0–1000 and updates that competence's score. *In progress: three Spatial games so far, shown on a test
-  screen.*
+  game scores 0–1000 and updates that competence's score. *In progress: the Spatial, Attention and Mental Math
+  games have their daily version (11 of 20), shown on a test screen; Memory, Logic and Multitasking are next.*
 - **Daily Missions** — several "systems" (modules) on one screen at the same time, like a cockpit. Generated each
   day from the date, Short (2–3 min) or Regular (5–7 min), with systems introduced one by one.
 - **Full Clearance** — every game with free settings, plus **Mission Mode** (fly an archive mission or compose one
@@ -35,27 +35,30 @@ A cognitive training app for future pilots and astronauts. Six competences, trai
 | # | Game | Competence | Daily version |
 |---|---|---|---|
 | 01 | Cube Rotation | Spatial | ✓ 5 sets, slow to hidden |
-| 02 | Reaction Time | Attention | |
+| 02 | Reaction Time | Attention | ✓ 10 rounds, easy to hard |
 | 03 | Memory Sequences | Memory | |
-| 04 | Selective Attention | Attention | |
+| 04 | Selective Attention | Attention | ✓ 10 trials, easy to hard |
 | 05 | N-back | Memory | |
 | 06 | Heading and Beacon | Spatial | ✓ 10 rounds in 3 stages |
-| 07 | Flash Math | Mental Math | |
-| 08 | Running Total | Mental Math | |
+| 07 | Flash Math | Mental Math | ✓ 25 questions in 2 minutes |
+| 08 | Running Total | Mental Math | ✓ 5 series, slow to fast |
 | 09 | Visual Memory | Memory | |
 | 10 | Turn Count | Spatial | ✓ 5 routes, slow to fast |
 | 11 | Target Drift | Multitasking | |
-| 12 | Anomaly Detection | Attention | |
+| 12 | Anomaly Detection | Attention | ✓ 90 seconds, slow to fast |
 | 13 | Airways | Multitasking | |
-| 14 | Estimation | Mental Math | |
-| 15 | Visual Scan | Attention | |
+| 14 | Estimation | Mental Math | ✓ 12 estimates, every kind |
+| 15 | Visual Scan | Attention | ✓ 3 grids, 3 × 3 to 5 × 5 |
 | 16 | Switchboard | Logic | |
 | 17 | Landing Order | Logic | |
 | 18 | Pattern Matrix | Logic | |
 | 19 | Circuits | Logic | |
-| 20 | Cube Nets | Spatial | |
+| 20 | Cube Nets | Spatial | ✓ 8 puzzles, easy to hard |
 
-The list lives in `src/data/exercises.js`; daily versions are registered in `src/daily/registry.js`.
+The list lives in `src/data/exercises.js`; daily versions are registered in `src/daily/registry.js`. A daily
+version lives in the game's own file (a `daily` prop, or a separate `Daily…` component for Cube Rotation) and uses
+the same scoring function as Full Clearance — one function per game (`roundPoints`, `gridPoints`,
+`estimatePoints`…), so a change to the grid applies to both modes.
 
 ### Mission modules
 
@@ -113,7 +116,7 @@ src/
 
 ## Tech
 
-Expo SDK 57 · React Native 0.86 · Reanimated 4 · Gesture Handler · React Native Skia · expo-gl (GLSL shaders) ·
+Expo SDK 58 · React Native 0.88 · Reanimated 4 · Gesture Handler · React Native Skia · expo-gl (GLSL shaders) ·
 react-native-svg · expo-speech / expo-audio · AsyncStorage.
 
 ## Credits
