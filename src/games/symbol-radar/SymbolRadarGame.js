@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import Animated, { FadeIn } from "react-native-reanimated";
 import Svg, { Circle, Line, Polygon } from "react-native-svg";
@@ -8,6 +8,7 @@ import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
+import { createRandom, deriveSeed, randomTools } from "../../utils/random";
 
 const ACCENT = SPACE_CADET.attention;
 const SUCCESS = "#34D399";
@@ -16,11 +17,75 @@ const RADAR_HEIGHT = 560;
 const TRACK_COUNT = 20;
 const COLUMN_COUNT = 16;
 
-function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-function randomItem(items) { return items[Math.floor(Math.random() * items.length)]; }
-function formatTime(seconds) { return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; }
-function stepDelay(speed) { return speed === 1 ? 700 : speed === 2 ? 560 : 440; }
-function buildTarget(track, allowAnomaly) { const isAnomaly = allowAnomaly && Math.random() < 0.12; return { id: `${Date.now()}-${Math.random()}`, track, column: 0, symbol: isAnomaly ? "octagon" : "circle", isAnomaly }; }
+function formatTime(ms) { const seconds = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; }
+export function stepDelay(speed) { return speed === 1 ? 700 : speed === 2 ? 560 : 440; }
+const PACE_LABELS = { 1: "SLOW", 2: "MEDIUM", 3: "FAST" };
+
+// Daily training: 90 seconds for everyone, the signals speeding up every 30 seconds.
+export const DAILY_PHASES = [{ speed: 1, seconds: 30 }, { speed: 2, seconds: 30 }, { speed: 3, seconds: 30 }];
+const FIRST_SPAWN_MS = 500;
+const ANOMALY_EVERY_S = 6;            // one anomaly per 6 s on average: 15 in the daily's 90 s
+const FIRST_ANOMALY_TICK = 8;         // a few seconds of plain signals first
+const MIN_ANOMALY_GAP = 6;            // ticks between two anomaly spawns
+const TAIL_TICKS = COLUMN_COUNT;      // no anomaly spawned too late to cross the screen before the end
+// Points of an anomaly: 1 if caught in the first quarter of the screen, then 0.75, 0.5 and 0.25 by quarter,
+// and −1 if missed. Each false alarm costs half a point, so tapping every line is never a strategy. The total
+// is floored at 0 and scaled to 1000.
+const QUARTER_POINTS = [1, 0.75, 0.5, 0.25];
+const MISS_COST = 1;
+const FALSE_ALARM_COST = 0.5;
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+export function anomalyPoints(column) { return QUARTER_POINTS[clamp(Math.floor((column / COLUMN_COUNT) * QUARTER_POINTS.length), 0, QUARTER_POINTS.length - 1)]; }
+
+// The whole session drawn from the seed before it starts: every tick (its delay and pace), what spawns at each
+// tick, and when the anomalies come. Spawning is simulated on a virtual board that ignores the player's taps, so
+// two players of the same seed see exactly the same stream whatever they do. An anomaly never spawns on a track
+// that still carries one.
+export function buildSchedule(phases, seed) {
+  const rnd = randomTools(createRandom(seed));
+  const ticks = [{ delayMs: FIRST_SPAWN_MS, move: false, speed: phases[0].speed }];
+  const ranges = [];
+  phases.forEach((phase) => {
+    const count = Math.round((phase.seconds * 1000) / stepDelay(phase.speed));
+    ranges.push({ from: ticks.length, to: ticks.length + count - 1, anomalies: Math.round(phase.seconds / ANOMALY_EVERY_S) });
+    for (let index = 0; index < count; index += 1) ticks.push({ delayMs: stepDelay(phase.speed), move: true, speed: phase.speed });
+  });
+  const anomalyTicks = [];
+  ranges.forEach((range) => {
+    const from = Math.max(range.from, FIRST_ANOMALY_TICK);
+    const to = Math.min(range.to, ticks.length - 1 - TAIL_TICKS);
+    let placed = 0;
+    for (let attempt = 0; attempt < 500 && placed < range.anomalies && from <= to; attempt += 1) {
+      const tick = rnd.int(from, to);
+      if (anomalyTicks.every((other) => Math.abs(other - tick) >= MIN_ANOMALY_GAP)) { anomalyTicks.push(tick); placed += 1; }
+    }
+  });
+  let board = [];
+  const spawns = ticks.map((tick, index) => {
+    if (tick.move) board = board.filter((target) => target.column < COLUMN_COUNT - 1).map((target) => ({ ...target, column: target.column + 1 }));
+    const occupied = board.filter((target) => target.column === 0).map((target) => target.track);
+    const available = Array.from({ length: TRACK_COUNT }, (_, track) => track).filter((track) => !occupied.includes(track));
+    const minimum = board.length < 6 ? 2 : 0;
+    const selected = rnd.shuffle(available).slice(0, Math.min(rnd.int(minimum, 5), available.length));
+    const entries = selected.map((track) => ({ track, isAnomaly: false }));
+    if (anomalyTicks.includes(index)) {
+      const clear = (track) => !board.some((target) => target.track === track && target.isAnomaly);
+      const slot = entries.find((entry) => clear(entry.track));
+      if (slot) slot.isAnomaly = true;
+      else { const free = available.filter((track) => !selected.includes(track) && clear(track)); if (free.length) entries.push({ track: rnd.item(free), isAnomaly: true }); }
+    }
+    board.push(...entries.map((entry) => ({ ...entry, column: 0 })));
+    return entries;
+  });
+  return { ticks, spawns, anomalies: spawns.flat().filter((entry) => entry.isAnomaly).length, totalMs: ticks.reduce((sum, tick) => sum + tick.delayMs, 0) };
+}
+
+// Score out of 1000 from the anomaly outcomes and the false alarms.
+export function radarScore(outcomes, falseAlarms, anomalies) {
+  if (!anomalies) return 0;
+  const points = outcomes.reduce((sum, outcome) => sum + outcome.points, 0) - falseAlarms * FALSE_ALARM_COST;
+  return clamp(Math.round(clamp(points / anomalies, 0, 1) * 1000), 0, 1000);
+}
 
 function SignalGlyph({ symbol, color = "rgba(255,255,255,0.68)" }) {
   return <Svg width="25" height="25" viewBox="0 0 24 24">{symbol === "circle" ? <Circle cx="12" cy="12" r="6.5" fill="none" stroke={color} strokeWidth="1.65" /> : <Polygon points="12,4.35 17.4,6.6 19.65,12 17.4,17.4 12,19.65 6.6,17.4 4.35,12 6.6,6.6" fill="none" stroke={color} strokeWidth="1.9" strokeLinejoin="round" />}</Svg>;
@@ -38,10 +103,6 @@ function PreviewGuides() {
   const previewRows = 4;
   const previewColumns = 8;
   return <Svg pointerEvents="none" width={previewWidth} height={previewHeight} style={styles.guideOverlay}>{Array.from({ length: previewColumns + 1 }, (_, index) => { const x = (index / previewColumns) * previewWidth; return <Line key={`preview-column-${index}`} x1={x} y1="0" x2={x} y2={previewHeight} stroke={guideColor} strokeWidth="0.55" strokeDasharray="1.5 5" />; })}{Array.from({ length: previewRows + 1 }, (_, index) => { const y = (index / previewRows) * previewHeight; return <Line key={`preview-row-${index}`} x1="0" y1={y} x2={previewWidth} y2={y} stroke={guideColor} strokeWidth="1" strokeDasharray="3.5 3.5" />; })}</Svg>;
-}
-
-function LegacyRadarDisplay({ targets, feedback, onPress }) {
-  return <View style={styles.radarShell}><View style={styles.radar}>{Array.from({ length: COLUMN_COUNT + 1 }, (_, index) => <View key={`column-${index}`} pointerEvents="none" style={[styles.verticalGuide, { left: `${(index / COLUMN_COUNT) * 100}%` }]} />)}{Array.from({ length: TRACK_COUNT + 1 }, (_, index) => <View key={`row-${index}`} pointerEvents="none" style={[styles.horizontalGuide, { top: `${(index / TRACK_COUNT) * 100}%` }]} />)}{Array.from({ length: TRACK_COUNT }, (_, track) => { const rowTargets = targets.filter((target) => target.track === track); const rowFeedback = feedback?.track === track ? feedback.type : null; return <TouchableOpacity key={track} activeOpacity={0.86} onPress={() => onPress(track)} style={[styles.trackTouch, { top: `${(track / TRACK_COUNT) * 100}%`, height: `${100 / TRACK_COUNT}%` }, rowFeedback === "success" && styles.trackSuccess, rowFeedback === "error" && styles.trackError, rowFeedback === "missed" && styles.trackMissed]}>{rowTargets.map((target) => <View key={target.id} pointerEvents="none" style={[styles.symbol, { left: `${((target.column + 0.5) / COLUMN_COUNT) * 100}%` }, target.isAnomaly && styles.anomalyGlow]}><SignalGlyph symbol={target.symbol} active={target.isAnomaly} /></View>)}</TouchableOpacity>; })}</View>{Array.from({ length: TRACK_COUNT }, (_, track) => <View key={track} pointerEvents="none" style={[styles.trackPointer, { top: `${((track + 0.5) / TRACK_COUNT) * 100}%` }]} />)}</View>;
 }
 
 function RadarDisplay({ targets, feedback, onPress }) {
@@ -98,9 +159,12 @@ function RadarPreview() {
   return <View style={styles.previewRadar}><PreviewGuides /><View style={styles.previewLines}>{previewRows.map((symbols, rowIndex) => <View key={rowIndex} style={styles.previewLine}>{symbols.map((symbol, index) => <View key={index} style={[styles.previewSymbol, { left: `${6.25 + index * 25}%` }, symbol === "octagon" && styles.previewAnomaly]}><SignalGlyph symbol={symbol} color={symbol === "octagon" ? ACCENT : undefined} /></View>)}</View>)}</View></View>;
 }
 
-export function SymbolRadarGame({ onExit }) {
-  const [durationMinutes, setDurationMinutes] = useState(1); const [speed, setSpeed] = useState(2); const [phase, setPhase] = useState("preflight"); const [remainingSeconds, setRemainingSeconds] = useState(60); const [targets, setTargets] = useState([]); const [feedback, setFeedback] = useState(null); const [stats, setStats] = useState({ hits: 0, missed: 0, falseAlarms: 0 });
-  const timersRef = useRef([]); const intervalsRef = useRef([]); const activeRef = useRef(false); const targetsRef = useRef([]); const statsRef = useRef(stats); const allowAnomaliesRef = useRef(false);
+
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's
+// 90-second stream (DAILY_PHASES), then onFinish({ score, metrics, trials }).
+export function SymbolRadarGame({ onExit, daily = null }) {
+  const [durationMinutes, setDurationMinutes] = useState(1); const [speed, setSpeed] = useState(2); const [phase, setPhase] = useState(daily ? "ready" : "preflight"); const [remainingMs, setRemainingMs] = useState(0); const [pace, setPace] = useState(2); const [targets, setTargets] = useState([]); const [feedback, setFeedback] = useState(null); const [stats, setStats] = useState({ hits: 0, missed: 0, falseAlarms: 0 }); const [summary, setSummary] = useState(null);
+  const timersRef = useRef([]); const intervalsRef = useRef([]); const activeRef = useRef(false); const targetsRef = useRef([]); const statsRef = useRef(stats); const scheduleRef = useRef(null); const outcomesRef = useRef([]); const startedAtRef = useRef(0);
   const { isReturning, missionStyle, preflightStyle, startMission, returnToPreflight } = useMissionTransition({ onPrepareReturn: clearTimers, onReturnComplete: resetToPreflight });
 
   useEffect(() => () => clearTimers(), []);
@@ -108,37 +172,73 @@ export function SymbolRadarGame({ onExit }) {
   function queue(callback, delay) { timersRef.current.push(setTimeout(callback, delay)); }
   function updateStats(update) { statsRef.current = { ...statsRef.current, ...update(statsRef.current) }; setStats(statsRef.current); }
   function renderTargets() { setTargets([...targetsRef.current]); }
-  function hasAnomaly() { return targetsRef.current.some((target) => target.isAnomaly); }
-  function resetToPreflight() { clearTimers(); setTargets([]); setFeedback(null); setPhase("preflight"); }
-  function resetToReady() { clearTimers(); setTargets([]); setFeedback(null); setPhase("ready"); }
+  function resetToPreflight() { clearTimers(); setTargets([]); setFeedback(null); setSummary(null); setPhase("preflight"); }
+  function resetToReady() { clearTimers(); setTargets([]); setFeedback(null); setSummary(null); setPhase("ready"); }
   function prepareRun() { void triggerSelectionHaptic(); startMission(resetToReady); }
-  function addTargets() { const occupied = targetsRef.current.filter((target) => target.column === 0).map((target) => target.track); const available = Array.from({ length: TRACK_COUNT }, (_, index) => index).filter((track) => !occupied.includes(track)); const minimum = targetsRef.current.length < 6 ? 2 : 0; const count = Math.min(randomInt(minimum, 5), available.length); const selected = []; while (selected.length < count) selected.push(randomItem(available.filter((track) => !selected.includes(track)))); selected.forEach((track) => targetsRef.current.push(buildTarget(track, allowAnomaliesRef.current && !hasAnomaly()))); }
-  function finishGame() { clearTimers(); targetsRef.current = []; setTargets([]); setPhase("summary"); }
-  function startGame() { clearTimers(); const clean = { hits: 0, missed: 0, falseAlarms: 0 }; setRemainingSeconds(durationMinutes * 60); setStats(clean); statsRef.current = clean; setFeedback(null); targetsRef.current = []; setTargets([]); allowAnomaliesRef.current = false; activeRef.current = true; setPhase("playing"); void triggerSelectionHaptic(); queue(() => { addTargets(); renderTargets(); }, 500); queue(() => { allowAnomaliesRef.current = true; }, 7500); const movement = setInterval(() => { const exiting = targetsRef.current.filter((target) => target.column >= COLUMN_COUNT - 1); exiting.filter((target) => target.isAnomaly).forEach((target) => { updateStats((current) => ({ ...current, missed: current.missed + 1 })); setFeedback({ type: "missed", track: target.track }); void triggerErrorHaptic(); queue(() => setFeedback(null), 420); }); targetsRef.current = targetsRef.current.filter((target) => !exiting.includes(target)).map((target) => ({ ...target, column: target.column + 1 })); addTargets(); renderTargets(); }, stepDelay(speed)); intervalsRef.current.push(movement); intervalsRef.current.push(setInterval(() => setRemainingSeconds((seconds) => { if (seconds <= 1) { finishGame(); return 0; } return seconds - 1; }), 1000)); }
+  function startGame() {
+    clearTimers();
+    const clean = { hits: 0, missed: 0, falseAlarms: 0 };
+    setStats(clean); statsRef.current = clean; setFeedback(null); targetsRef.current = []; setTargets([]); outcomesRef.current = [];
+    const schedule = daily ? buildSchedule(DAILY_PHASES, deriveSeed(daily.seed, "radar")) : buildSchedule([{ speed, seconds: durationMinutes * 60 }], Math.floor(Math.random() * 4294967296));
+    scheduleRef.current = schedule;
+    setRemainingMs(schedule.totalMs); setPace(schedule.ticks[0].speed);
+    activeRef.current = true; setPhase("playing"); void triggerSelectionHaptic();
+    startedAtRef.current = Date.now();
+    intervalsRef.current.push(setInterval(() => setRemainingMs(schedule.totalMs - (Date.now() - startedAtRef.current)), 250));
+    runTick(0);
+  }
+  function runTick(index) {
+    const schedule = scheduleRef.current;
+    const tick = schedule.ticks[index];
+    queue(() => {
+      if (tick.move) {
+        const exiting = targetsRef.current.filter((target) => target.column >= COLUMN_COUNT - 1);
+        exiting.filter((target) => target.isAnomaly && !target.hit).forEach((target) => {
+          outcomesRef.current.push({ points: -MISS_COST, outcome: "missed", reactionMs: null, speed: tick.speed });
+          updateStats((current) => ({ ...current, missed: current.missed + 1 }));
+          setFeedback({ type: "missed", track: target.track }); void triggerErrorHaptic(); queue(() => setFeedback(null), 420);
+        });
+        targetsRef.current = targetsRef.current.filter((target) => !exiting.includes(target)).map((target) => ({ ...target, column: target.column + 1 }));
+      }
+      const now = Date.now();
+      schedule.spawns[index].forEach((entry, position) => targetsRef.current.push({ id: `${index}-${position}`, track: entry.track, column: 0, symbol: entry.isAnomaly ? "octagon" : "circle", isAnomaly: entry.isAnomaly, spawnedAt: now, hit: false }));
+      setPace(tick.speed);
+      renderTargets();
+      if (index + 1 < schedule.ticks.length) runTick(index + 1); else finishGame();
+    }, tick.delayMs);
+  }
+  function finishGame() {
+    clearTimers(); targetsRef.current = []; setTargets([]);
+    const outcomes = outcomesRef.current; const { falseAlarms } = statsRef.current; const anomalies = scheduleRef.current.anomalies;
+    const score = radarScore(outcomes, falseAlarms, anomalies);
+    const times = outcomes.map((outcome) => outcome.reactionMs).filter((value) => value !== null);
+    const result = { score, anomalies, fast: outcomes.filter((outcome) => outcome.outcome === "fast").length, late: outcomes.filter((outcome) => outcome.outcome === "late").length, missed: outcomes.filter((outcome) => outcome.outcome === "missed").length, falseAlarms, meanReactionMs: times.length ? Math.round(times.reduce((sum, value) => sum + value, 0) / times.length) : null };
+    if (daily) { daily.onFinish({ score, metrics: { detected: result.fast + result.late, anomalies, fast: result.fast, late: result.late, missed: result.missed, falseAlarms, meanReactionMs: result.meanReactionMs }, trials: outcomes.map((outcome) => ({ ok: outcome.points > 0 ? 1 : 0, pts: outcome.points, ms: outcome.reactionMs, speed: outcome.speed })) }); return; }
+    setSummary(result); setPhase("summary");
+  }
   function pressTrack(track) {
     if (!activeRef.current) return;
-
-    if (targetsRef.current.some((target) => target.track === track && target.isAnomaly)) {
+    const anomaly = targetsRef.current.find((target) => target.track === track && target.isAnomaly && !target.hit);
+    if (anomaly) {
+      anomaly.hit = true;
+      const points = anomalyPoints(anomaly.column);
+      const late = points < 1;
+      outcomesRef.current.push({ points, outcome: late ? "late" : "fast", reactionMs: Date.now() - anomaly.spawnedAt, speed: pace });
       updateStats((current) => ({ ...current, hits: current.hits + 1 }));
-      setFeedback({ type: "success", track });
+      setFeedback({ type: "success", track, points });
       void triggerSuccessHaptic();
-      queue(() => {
-        targetsRef.current = targetsRef.current.filter((target) => target.track !== track);
-        renderTargets();
-      }, 280);
+      queue(() => { targetsRef.current = targetsRef.current.filter((target) => target.track !== track); renderTargets(); }, 280);
       queue(() => setFeedback(null), 780);
       return;
     }
-
     updateStats((current) => ({ ...current, falseAlarms: current.falseAlarms + 1 }));
     setFeedback({ type: "error", track });
     void triggerErrorHaptic();
     queue(() => setFeedback(null), 820);
   }
-  const summary = useMemo(() => { const anomalies = stats.hits + stats.missed; return { detectionRate: anomalies ? Math.round((stats.hits / anomalies) * 100) : 0, anomalies }; }, [stats]);
-  const preflight = <GameSetupShell title="Anomaly Detection" categoryKey="attention" onExit={onExit} onStart={prepareRun} rules="Tests sustained visual attention. Monitor the moving signal lines and tap only when a line contains an octagon. A normal circle is a false alarm.Easy: Signals move slowly.Medium: Signals update at a normal pace.Hard: Signals move quickly."><PickerSetting label="Duration" hint="In minutes" options={[1, 2, 3].map((value) => ({ value, label: String(value) }))} value={durationMinutes} onChange={setDurationMinutes} /><PickerSetting label="Signal pace" options={[{ value: 1, label: "SLOW" }, { value: 2, label: "MEDIUM" }, { value: 3, label: "FAST" }]} value={speed} onChange={setSpeed} /></GameSetupShell>;
+  const preflight = <GameSetupShell title="Anomaly Detection" categoryKey="attention" onExit={onExit} onStart={prepareRun} rules="Tests sustained visual attention. Monitor the moving signal lines and tap only when a line contains an octagon. An anomaly earns 1 point if caught in the first quarter of the screen, then 0.75, 0.5 and 0.25 by quarter, and costs 1 point if missed; each false alarm (a tap on a line without octagon) costs half a point. The score is the share of points earned, out of 1000.Easy: Signals move slowly.Medium: Signals update at a normal pace.Hard: Signals move quickly."><PickerSetting label="Duration" hint="In minutes" options={[1, 2, 3].map((value) => ({ value, label: String(value) }))} value={durationMinutes} onChange={setDurationMinutes} /><PickerSetting label="Signal pace" options={[{ value: 1, label: "SLOW" }, { value: 2, label: "MEDIUM" }, { value: 3, label: "FAST" }]} value={speed} onChange={setSpeed} /></GameSetupShell>;
 
-  return <View style={styles.container}>{phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}{phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, missionStyle]}><View style={styles.header}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>{phase === "ready" ? <Pressable onPress={startGame} style={styles.readyScreen}><Text style={styles.kicker}>ANOMALY DETECTION</Text><Text style={styles.readyTitle}>Find the outlier.</Text><Text style={styles.readyText}>Tap the signal line only when it contains an octagon</Text><PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt><RadarPreview /></Pressable> : null}{phase === "playing" ? <Animated.View entering={FadeIn.duration(150)} style={styles.playScreen}><View style={styles.statusRow}><Text style={styles.statusText}>TIME {formatTime(remainingSeconds)}</Text><Text style={styles.statusText}>DETECTED {stats.hits}</Text></View><Text style={styles.instruction}>Tap the line with the octagon</Text><RadarDisplay targets={targets} feedback={feedback} onPress={pressTrack} /><Text style={[styles.feedbackText, feedback?.type === "success" && styles.feedbackSuccess, feedback?.type === "error" && styles.feedbackError]}>{feedback?.type === "success" ? "ANOMALY DETECTED" : feedback?.type === "error" ? "FALSE ALARM" : feedback?.type === "missed" ? "ANOMALY MISSED" : ""}</Text></Animated.View> : null}{phase === "summary" ? <Animated.View entering={FadeIn.duration(180)} style={styles.summaryScreen}><Text style={styles.kicker}>SESSION ENDED</Text><Text style={styles.summaryTitle}>Scan complete</Text><Text style={styles.score}>{summary.detectionRate}%</Text><Text style={styles.scoreCaption}>detection rate</Text><View style={styles.statCard}><Text style={styles.statLabel}>SESSION DATA</Text><Text style={styles.statLine}>Anomalies detected <Text style={styles.statStrong}>{stats.hits} / {summary.anomalies}</Text></Text><Text style={styles.statLine}>Anomalies missed <Text style={styles.statStrong}>{stats.missed}</Text></Text><Text style={styles.statLine}>False alarms <Text style={styles.statStrong}>{stats.falseAlarms}</Text></Text></View><View style={styles.actions}><TouchableOpacity activeOpacity={0.88} onPress={resetToReady} style={styles.primaryButton}><Text style={styles.primaryText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.88} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryText}>Change settings</Text></TouchableOpacity></View></Animated.View> : null}</Animated.View> : null}</View>;
+  return <View style={styles.container}>{phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}{phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, !daily && missionStyle]}><View style={styles.header}><Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>{phase === "ready" ? <Pressable onPress={startGame} style={styles.readyScreen}><Text style={styles.kicker}>{daily ? "DAILY TRAINING" : "ANOMALY DETECTION"}</Text><Text style={styles.readyTitle}>Find the outlier.</Text><Text style={styles.readyText}>{daily ? "90 seconds, the signals speeding up every 30. Tap a line only when it contains an octagon: the sooner, the more points." : "Tap the signal line only when it contains an octagon"}</Text><PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt><RadarPreview /></Pressable> : null}{phase === "playing" ? <Animated.View entering={FadeIn.duration(150)} style={styles.playScreen}><View style={styles.statusRow}><Text style={styles.statusText}>TIME {formatTime(remainingMs)}</Text><Text style={styles.statusText}>PACE {PACE_LABELS[pace]}</Text><Text style={styles.statusText}>DETECTED {stats.hits}</Text></View><Text style={styles.instruction}>Tap the line with the octagon</Text><RadarDisplay targets={targets} feedback={feedback} onPress={pressTrack} /><Text style={[styles.feedbackText, feedback?.type === "success" && styles.feedbackSuccess, feedback?.type === "error" && styles.feedbackError]}>{feedback?.type === "success" ? `ANOMALY DETECTED · ${feedback.points === 1 ? "+1" : `+${feedback.points}`}` : feedback?.type === "error" ? "FALSE ALARM" : feedback?.type === "missed" ? "ANOMALY MISSED" : ""}</Text></Animated.View> : null}{phase === "summary" && summary ? <Animated.View entering={FadeIn.duration(180)} style={styles.summaryScreen}><Text style={styles.kicker}>SESSION ENDED</Text><Text style={styles.summaryTitle}>Scan complete</Text><Text style={styles.score}>{summary.score}</Text><Text style={styles.scoreCaption}>/ 1000</Text><View style={styles.statCard}><Text style={styles.statLabel}>SESSION DATA</Text><Text style={styles.statLine}>Anomalies detected <Text style={styles.statStrong}>{summary.fast + summary.late} / {summary.anomalies}</Text></Text><Text style={styles.statLine}>Full points · partial <Text style={styles.statStrong}>{summary.fast} · {summary.late}</Text></Text><Text style={styles.statLine}>Anomalies missed <Text style={styles.statStrong}>{summary.missed}</Text></Text><Text style={styles.statLine}>False alarms <Text style={styles.statStrong}>{summary.falseAlarms}</Text></Text><Text style={styles.statLine}>Average detection <Text style={styles.statStrong}>{summary.meanReactionMs !== null ? `${summary.meanReactionMs} ms` : "—"}</Text></Text></View><View style={styles.actions}><TouchableOpacity activeOpacity={0.88} onPress={resetToReady} style={styles.primaryButton}><Text style={styles.primaryText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.88} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryText}>Change settings</Text></TouchableOpacity></View></Animated.View> : null}</Animated.View> : null}</View>;
 }
 
 const styles = StyleSheet.create({

@@ -8,6 +8,7 @@ import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
+import { createRandom, deriveSeed, randomTools } from "../../utils/random";
 
 const ACCENT = SPACE_CADET.attention;
 const ACCENT_CLEAR = "rgba(216,30,91,0)";
@@ -32,7 +33,7 @@ function numbersUpTo(count) { return Array.from({ length: count }, (_, index) =>
 function lettersUpTo(count) { return LETTERS.slice(0, count).split(""); }
 function formatSeconds(ms) { return (ms / 1000).toFixed(1); }
 
-// `random` is injectable so the daily challenge can later pass a seeded generator instead of Math.random.
+// `random` is injectable: the daily version passes a seeded generator instead of Math.random.
 // In "mixed" mode the starting type gets the extra character on odd grids, and both halves run in the chosen
 // direction before being interleaved: forward 1 A 2 B 3…, reverse 5 D 4 C 3… (always opening with `startsWith`).
 function buildRound({ gridSize, direction, characters }, random = Math.random) {
@@ -113,24 +114,75 @@ function ScanGrid({ round, gridSize, progress, errorFlash, onTap }) {
   </View>;
 }
 
-export function VisualScanGame({ onExit }) {
+
+// Points of a grid (0–100): a time share, minus error penalties. The time share is 100 at or under `fast` and
+// 0 at `slow`, both per cell and scaled by what makes a grid slower to read (letters, mixing, reverse order, a
+// wider 5 × 5), with a gentle curve in between. Each error then costs a fixed amount that grows with the
+// error's rank, and small grids forgive less: one error in a 3 × 3 already costs a medium penalty.
+//   3 × 3  10, 20, 30, 40…      4 × 4  5, 10, 20, 30…      5 × 5  5, 10, 10, 20, 30…
+const CELL_FAST_MS = 350;
+const CELL_SLOW_MS = 1500;
+const CHARACTER_FACTOR = { numbers: 1, letters: 1.15, mixed: 1.35 };
+const DIRECTION_FACTOR = { forward: 1, reverse: 1.2 };
+const GRID_FACTOR = { 3: 0.95, 4: 1, 5: 1.1 };
+const ERROR_PENALTIES = { 3: [10, 20], 4: [5, 10, 20], 5: [5, 10, 10, 20] };
+const PENALTY_STEP = 10;
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+export function gridPoints({ gridSize, direction, characters }, timeMs, errors) {
+  const cells = gridSize * gridSize;
+  const factor = CHARACTER_FACTOR[characters] * DIRECTION_FACTOR[direction] * GRID_FACTOR[gridSize];
+  const fast = cells * CELL_FAST_MS * factor;
+  const slow = cells * CELL_SLOW_MS * factor;
+  const share = clamp((slow - timeMs) / (slow - fast), 0, 1);
+  const table = ERROR_PENALTIES[gridSize];
+  let penalty = 0;
+  for (let rank = 0; rank < errors; rank += 1) penalty += rank < table.length ? table[rank] : table.at(-1) + PENALTY_STEP * (rank - table.length + 1);
+  return clamp(Math.round(100 * share ** 1.2 - penalty), 0, 100);
+}
+
+// Daily training: three grids for everyone, 3 × 3, 4 × 4, 5 × 5. Each gets a different character set and its own
+// direction, drawn from the seed. The score is the three grids' points scaled to 1000 (300 → 1000).
+export const DAILY_GRIDS = [3, 4, 5];
+export function buildDailyRounds(seed) {
+  const rnd = randomTools(createRandom(seed));
+  const characters = rnd.shuffle(CHARACTER_SETS.map((option) => option.value));
+  return DAILY_GRIDS.map((gridSize, index) => {
+    const settings = { gridSize, direction: rnd.chance(0.5) ? "reverse" : "forward", characters: characters[index] };
+    return { settings, round: buildRound(settings, rnd.random) };
+  });
+}
+
+// The ready screen's illustration: a small scrambled grid, the same every time.
+const SAMPLE_CELLS = ["4", "1", "7", "2", "9", "5", "8", "3", "6"];
+function SampleGrid() {
+  return <View style={styles.sampleGrid}>{SAMPLE_CELLS.map((label, index) => <View key={index} style={styles.sampleCell}><Text style={styles.sampleText}>{label}</Text></View>)}</View>;
+}
+
+
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's three
+// grids (DAILY_GRIDS), each with its own ready screen, then onFinish({ score, metrics, trials }).
+export function VisualScanGame({ onExit, daily = null }) {
   const [gridSize, setGridSize] = useState(3);
   const [direction, setDirection] = useState("forward");
   const [characters, setCharacters] = useState("numbers");
-  const [phase, setPhase] = useState("preflight");
-  const [round, setRound] = useState(null);
+  const dailyRoundsRef = useRef(daily ? buildDailyRounds(deriveSeed(daily.seed, "grids")) : null);
+  const [phase, setPhase] = useState(daily ? "ready" : "preflight");
+  const [round, setRound] = useState(daily ? dailyRoundsRef.current[0].round : null);
   const [roundId, setRoundId] = useState(0);
+  const [roundIndex, setRoundIndex] = useState(0);
   const [progress, setProgress] = useState(0);
   const [errors, setErrors] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [errorFlash, setErrorFlash] = useState({ index: -1, tick: 0 });
   const [result, setResult] = useState(null);
-  const phaseRef = useRef("preflight");
-  const settingsRef = useRef(null);
-  const roundRef = useRef(null);
+  const [results, setResults] = useState([]);
+  const phaseRef = useRef(daily ? "ready" : "preflight");
+  const settingsRef = useRef(daily ? dailyRoundsRef.current[0].settings : null);
+  const roundRef = useRef(round);
   const progressRef = useRef(0);
   const errorsRef = useRef(0);
   const tapsRef = useRef(0);
+  const resultsRef = useRef([]);
   const startedAt = useRef(0);
   const intervalRef = useRef(null);
   const timeouts = useRef([]);
@@ -140,15 +192,17 @@ export function VisualScanGame({ onExit }) {
   function clearTimers() { clearInterval(intervalRef.current); intervalRef.current = null; timeouts.current.forEach(clearTimeout); timeouts.current = []; }
   function goTo(nextPhase) { phaseRef.current = nextPhase; setPhase(nextPhase); }
   function resetToPreflight() { clearTimers(); setRound(null); setResult(null); goTo("preflight"); }
-  function resetToReady() {
-    clearTimers();
-    const settings = settingsRef.current ?? { gridSize, direction, characters };
+  function prepareRound(settings, nextRound) {
     settingsRef.current = settings;
-    const nextRound = buildRound(settings);
     roundRef.current = nextRound;
     progressRef.current = 0; errorsRef.current = 0; tapsRef.current = 0;
     setRound(nextRound); setRoundId((value) => value + 1); setProgress(0); setErrors(0); setElapsed(0); setErrorFlash({ index: -1, tick: 0 }); setResult(null);
     goTo("ready");
+  }
+  function resetToReady() {
+    clearTimers();
+    const settings = settingsRef.current ?? { gridSize, direction, characters };
+    prepareRound(settings, buildRound(settings, createRandom(Math.floor(Math.random() * 4294967296))));
   }
   function prepareRun() { settingsRef.current = { gridSize, direction, characters }; startMission(resetToReady); }
   function beginRun() {
@@ -163,9 +217,25 @@ export function VisualScanGame({ onExit }) {
     setElapsed(timeMs);
     goTo("complete");
     void triggerSuccessHaptic();
+    const settings = settingsRef.current;
     const count = roundRef.current.sequence.length;
-    setResult({ timeMs, errors: errorsRef.current, perCellMs: Math.round(timeMs / count), accuracy: Math.round((count / tapsRef.current) * 100) });
-    timeouts.current.push(setTimeout(() => goTo("summary"), FINISH_DELAY_MS));
+    const entry = { ...settings, timeMs, errors: errorsRef.current, perCellMs: Math.round(timeMs / count), accuracy: Math.round((count / tapsRef.current) * 100), points: gridPoints(settings, timeMs, errorsRef.current) };
+    resultsRef.current = [...resultsRef.current, entry];
+    setResult(entry); setResults(resultsRef.current);
+    timeouts.current.push(setTimeout(() => {
+      if (!daily) { goTo("summary"); return; }
+      if (roundIndex + 1 < dailyRoundsRef.current.length) { const next = dailyRoundsRef.current[roundIndex + 1]; setRoundIndex(roundIndex + 1); prepareRound(next.settings, next.round); return; }
+      finishDaily();
+    }, FINISH_DELAY_MS));
+  }
+  function finishDaily() {
+    const entries = resultsRef.current;
+    const points = entries.reduce((sum, entry) => sum + entry.points, 0);
+    daily.onFinish({
+      score: clamp(Math.round(points * (1000 / (entries.length * 100))), 0, 1000),
+      metrics: { grids: entries.length, totalMs: entries.reduce((sum, entry) => sum + entry.timeMs, 0), errors: entries.reduce((sum, entry) => sum + entry.errors, 0), ...Object.fromEntries(entries.map((entry) => [`grid${entry.gridSize}Points`, entry.points])) },
+      trials: entries.map((entry) => ({ ok: entry.errors ? 0 : 1, ms: entry.timeMs, pts: entry.points, errors: entry.errors, grid: entry.gridSize, direction: entry.direction, characters: entry.characters })),
+    });
   }
   function handleTap(index) {
     if (phaseRef.current !== "playing") return;
@@ -187,9 +257,11 @@ export function VisualScanGame({ onExit }) {
 
   const activeSettings = settingsRef.current ?? { gridSize, direction, characters };
   const cellCount = gridSize * gridSize;
-  const settingsSummary = `${activeSettings.gridSize} × ${activeSettings.gridSize} · ${activeSettings.direction === "reverse" ? "REVERSE" : "FORWARD"} · ${CHARACTER_SETS.find((option) => option.value === activeSettings.characters)?.label}`;
+  const describe = (settings) => `${settings.gridSize} × ${settings.gridSize} · ${settings.direction === "reverse" ? "REVERSE" : "FORWARD"} · ${CHARACTER_SETS.find((option) => option.value === settings.characters)?.label}`;
+  const settingsSummary = describe(activeSettings);
+  const previous = daily && phase === "ready" ? results.at(-1) : null;
 
-  const preflight = <GameSetupShell title="Visual Scan" categoryKey="attention" onExit={onExit} onStart={prepareRun} rules="Tests visual scanning speed and sustained focus. Tap every character on the grid in order, as fast as you can. Each validated cell locks, and every wrong tap counts as an error.Easy: A 3 × 3 grid in forward order.Medium: A 4 × 4 grid, or reverse order.Hard: A 5 × 5 grid alternating numbers and letters.">
+  const preflight = <GameSetupShell title="Visual Scan" categoryKey="attention" onExit={onExit} onStart={prepareRun} rules="Tests visual scanning speed and sustained focus. Tap every character on the grid in order, as fast as you can. Each validated cell locks, and every wrong tap counts as an error. A grid scores up to 100 points, fewer the longer it takes, and each error costs a little more than the one before (a small grid forgives less).Easy: A 3 × 3 grid in forward order.Medium: A 4 × 4 grid, or reverse order.Hard: A 5 × 5 grid alternating numbers and letters.">
     <PickerSetting label="Grid size" hint={`${cellCount} cells to find`} options={[3, 4, 5].map((value) => ({ value, label: `${value} × ${value}` }))} value={gridSize} onChange={setGridSize} />
     <SettingCard label="Direction" hint={direction === "reverse" ? "Start from the highest value and count down." : "Start from 1 or A and count up."}>
       <ChoiceRow>{DIRECTIONS.map((option) => <ChoiceButton key={option.value} compact label={option.label} selected={direction === option.value} accent={ACCENT} onPress={() => setDirection(option.value)} />)}</ChoiceRow>
@@ -203,17 +275,19 @@ export function VisualScanGame({ onExit }) {
 
   return <View style={styles.container}>
     {phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}
-    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, missionStyle]}>
-      <View style={styles.header}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
+    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, !daily && missionStyle]}>
+      <View style={styles.header}><Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
 
       {phase === "ready" && round ? <Pressable onPress={beginRun} style={styles.readyScreen}>
-        <Text style={styles.kicker}>ATTENTION</Text>
-        <Text style={styles.readyTitle}>Ready to scan?</Text>
+        <Text style={styles.kicker}>{daily ? `DAILY TRAINING · GRID ${roundIndex + 1} / ${DAILY_GRIDS.length}` : "ATTENTION"}</Text>
+        <Text style={styles.readyTitle}>{daily ? `${activeSettings.gridSize} × ${activeSettings.gridSize}, ${activeSettings.direction === "reverse" ? "descending" : "ascending"}` : "Ready to scan?"}</Text>
         <Text style={styles.readyText}>{cueText(round, activeSettings.direction)}</Text>
+        <SampleGrid />
         <View style={styles.cueCard}>
           <Text style={styles.cueLabel}>{cueLabel(round, activeSettings.direction)}</Text>
           <SequencePreview sequence={round.sequence} />
         </View>
+        {previous ? <Text style={styles.previousText}>Grid {roundIndex} · {formatSeconds(previous.timeMs)} s · {previous.errors} {previous.errors === 1 ? "error" : "errors"} · {previous.points} / 100</Text> : null}
         <PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt>
       </Pressable> : null}
 
@@ -222,18 +296,18 @@ export function VisualScanGame({ onExit }) {
           <View><Text style={styles.statusLabel}>TIME</Text><Text style={styles.statusValue}>{formatSeconds(elapsed)}</Text></View>
           <View style={styles.statusRight}><Text style={styles.statusLabel}>FOUND</Text><Text style={styles.statusValue}>{progress}<Text style={styles.statusTotal}> / {round.sequence.length}</Text></Text></View>
         </View>
-        <Text style={styles.ruleKicker}>{cueLabel(round, activeSettings.direction)}</Text>
+        <Text style={styles.ruleKicker}>{daily ? `GRID ${roundIndex + 1} / ${DAILY_GRIDS.length} · ` : ""}{cueLabel(round, activeSettings.direction)}</Text>
         <View style={styles.gridArea}>
           <ScanGrid key={roundId} round={round} gridSize={activeSettings.gridSize} progress={progress} errorFlash={errorFlash} onTap={handleTap} />
         </View>
-        <Text style={styles.errorLine}>{errors ? `${errors} ${errors === 1 ? "error" : "errors"}` : " "}</Text>
+        <Text style={styles.errorLine}>{phase === "complete" && result ? `${result.points} / 100` : errors ? `${errors} ${errors === 1 ? "error" : "errors"}` : " "}</Text>
       </Animated.View> : null}
 
       {phase === "summary" && result ? <Animated.View entering={FadeIn.duration(180)} style={styles.summaryScreen}>
         <Text style={styles.kicker}>SESSION ENDED</Text>
         <Text style={styles.summaryTitle}>Scan complete</Text>
-        <Text style={styles.summaryScore}>{formatSeconds(result.timeMs)}</Text>
-        <Text style={styles.summaryCaption}>seconds</Text>
+        <Text style={styles.summaryScore}>{result.points * 10}</Text>
+        <Text style={styles.summaryCaption}>/ 1000 · {formatSeconds(result.timeMs)} seconds</Text>
         <View style={styles.statCard}>
           <Text style={styles.statLabel}>{settingsSummary}</Text>
           <Text style={styles.statLine}>Errors <Text style={styles.statStrong}>{result.errors}</Text></Text>
@@ -254,8 +328,9 @@ const styles = StyleSheet.create({
   header: { height: 64, paddingHorizontal: 20, justifyContent: "center" }, backButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" }, backArrow: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 32, lineHeight: 36 }, pressed: { transform: [{ scale: 0.97 }] },
   kicker: { color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.9, textAlign: "center" },
   readyScreen: { flex: 1, alignItems: "center", paddingHorizontal: 28, paddingTop: 54 }, readyTitle: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 30, marginTop: 9, textAlign: "center" }, readyText: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 14, lineHeight: 21, maxWidth: 296, textAlign: "center", marginTop: 12 },
-  cueCard: { width: "100%", maxWidth: 300, borderRadius: 22, paddingVertical: 24, paddingHorizontal: 20, alignItems: "center", backgroundColor: SPACE_CADET.surface1, marginTop: 52 }, cueLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.6 }, previewRow: { flexDirection: "row", alignItems: "center", marginTop: 16 }, previewToken: { flexDirection: "row", alignItems: "center" }, previewValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 29 }, previewArrow: { marginHorizontal: 11 }, previewEllipsis: { color: ACCENT, fontFamily: "Garet-Book", fontSize: 22, marginLeft: 10 },
-  beginPrompt: { marginTop: 48, textAlign: "center" },
+  sampleGrid: { width: 118, flexDirection: "row", flexWrap: "wrap", gap: 5, marginTop: 26 }, sampleCell: { width: 36, height: 36, borderRadius: 9, backgroundColor: SPACE_CADET.surface1, borderWidth: 1, borderColor: SPACE_CADET.borderSubtle, alignItems: "center", justifyContent: "center" }, sampleText: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 14 },
+  cueCard: { width: "100%", maxWidth: 300, borderRadius: 22, paddingVertical: 18, paddingHorizontal: 20, alignItems: "center", backgroundColor: SPACE_CADET.surface1, marginTop: 26 }, previousText: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-Regular", fontSize: 12, marginTop: 14 }, cueLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.6 }, previewRow: { flexDirection: "row", alignItems: "center", marginTop: 16 }, previewToken: { flexDirection: "row", alignItems: "center" }, previewValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 29 }, previewArrow: { marginHorizontal: 11 }, previewEllipsis: { color: ACCENT, fontFamily: "Garet-Book", fontSize: 22, marginLeft: 10 },
+  beginPrompt: { marginTop: 30, textAlign: "center" },
   playScreen: { flex: 1, paddingHorizontal: 20, paddingBottom: 56 }, statusRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 16 }, statusRight: { alignItems: "flex-end" }, statusLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 1.5 }, statusValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 28, marginTop: 3 }, statusTotal: { color: SPACE_CADET.textTertiary, fontSize: 18 },
   ruleKicker: { color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.7, textAlign: "center", marginTop: 34 },
   gridArea: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 12 }, grid: { flexDirection: "row", flexWrap: "wrap" }, cell: { flex: 1, borderWidth: 1, alignItems: "center", justifyContent: "center" }, cellText: { color: SPACE_CADET.white, fontFamily: "Garet-Book" },

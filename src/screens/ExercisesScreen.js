@@ -28,8 +28,7 @@ import { EXERCISES } from "../data/exercises";
 import { LinearGradient } from "expo-linear-gradient";
 import { MissionModeScreen, RAINBOW } from "../missions/MissionModeScreen";
 import { DailyGameScreen } from "../daily/DailyGameScreen";
-import { DAILY_GAMES, dailyGameFor } from "../daily/registry";
-import { useTrustedDay } from "../utils/useTrustedDay";
+import { DAILY_GAMES } from "../daily/registry";
 import { CATEGORY_COLORS, getCategoryLabel, SPACE_CADET } from "../theme/spaceCadet";
 
 const games = {
@@ -55,20 +54,15 @@ function FilterButton({ label, color, selected, isAll, onPress }) {
   </Pressable>;
 }
 
-// TEST LIST for the daily training: every game that already has a daily version, today's picks marked.
+// TEST LIST for the daily training: every game that already has a daily version.
 function DailyGrid({ categories, onSelect }) {
-  const { day } = useTrustedDay();
   const keys = Object.keys(DAILY_GAMES).filter((key) => !categories.length || categories.includes(DAILY_GAMES[key].competence));
   if (!keys.length) return <Text style={styles.emptyText}>No daily version in this category yet.</Text>;
   return <View style={styles.grid}>{keys.map((key) => {
     const exercise = EXERCISES.find((entry) => entry.key === key);
     const game = DAILY_GAMES[key];
-    const today = day && dailyGameFor(game.competence, day.key) === key;
     return <Pressable key={key} onPress={() => onSelect(key)} style={({ pressed }) => [styles.card, pressed && styles.pressed]}>
-      <View style={styles.cardTop}>
-        <View style={[styles.badge, { backgroundColor: CATEGORY_COLORS[game.competence] }]}><Text style={styles.badgeText}>{exercise?.badge ?? "··"}</Text></View>
-        {today ? <Text style={styles.todayTag}>TODAY</Text> : null}
-      </View>
+      <View style={[styles.badge, { backgroundColor: CATEGORY_COLORS[game.competence] }]}><Text style={styles.badgeText}>{exercise?.badge ?? "··"}</Text></View>
       <Text style={[styles.category, { color: CATEGORY_COLORS[game.competence] }]}>{getCategoryLabel(game.competence)}</Text>
       <Text style={styles.cardTitle}>{game.title}</Text>
       <Text style={styles.cardDescription}>{game.summary}</Text>
@@ -137,7 +131,7 @@ export function ExercisesScreen({ initialGameKey, onClose, mode = "clearance" })
     <Animated.View style={[styles.sheet, sheetStyle]}>
       <GestureDetector gesture={pan}><View style={styles.dragZone}><Animated.View style={[styles.handleWrap, handleStyle]}><View style={styles.sheetHandle} /></Animated.View><Animated.View style={[styles.header, headerStyle]}><Text style={styles.kicker}>{daily ? "DAILY TRAINING" : "FULL CLEARANCE"}</Text><Text style={styles.title}>{daily ? "Today" : "Exercises"}</Text></Animated.View><Animated.View pointerEvents={isExpanded ? "auto" : "none"} style={[styles.fullBackWrap, fullBackStyle]}><Pressable onPress={closeSheet} hitSlop={12} style={({ pressed }) => [styles.fullBackButton, pressed && styles.pressed]}><BackArrow /></Pressable></Animated.View></View></GestureDetector>
       <Animated.View style={[styles.expandedContent, expandedContentStyle]}>
-        <Text style={styles.subtitle}>{daily ? "Test screen: the daily versions built so far. Today's game in each competence is marked." : "Choose a session and train at your own pace."}</Text>
+        <Text style={styles.subtitle}>{daily ? "Test screen: the daily versions built so far." : "Choose a session and train at your own pace."}</Text>
         <View style={styles.filters}>
           <FilterButton label="All" isAll selected={!selectedCategories.length} onPress={() => setSelectedCategories([])} />
           {CATEGORY_KEYS.map((category) => <FilterButton key={category} label={getCategoryLabel(category)} color={CATEGORY_COLORS[category]} selected={selectedCategories.includes(category)} onPress={() => toggleCategory(category)} />)}
@@ -156,6 +150,5 @@ const styles = StyleSheet.create({
   expandedContent: { flex: 1 }, subtitle: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 14, lineHeight: 20, paddingHorizontal: 20, marginTop: 2, marginBottom: 16 }, filters: { flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: 6, paddingHorizontal: 8, marginBottom: 18 }, filterButton: { minHeight: 36, paddingHorizontal: 10, borderRadius: 999, borderWidth: 1, borderColor: SPACE_CADET.borderDefault, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(255,255,255,0.018)" }, filterButtonAllActive: { borderColor: SPACE_CADET.white, backgroundColor: "rgba(255,255,255,0.07)" }, filterDot: { width: 8, height: 8, borderRadius: 4 }, filterLabel: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 11 },
   exerciseScroll: { flex: 1 }, emptyText: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-Regular", fontSize: 13, textAlign: "center", marginTop: 48 }, content: { paddingHorizontal: 20, paddingBottom: 4 }, grid: { flexDirection: "row", flexWrap: "wrap", gap: 12 }, card: { width: "48.3%", minHeight: 174, padding: 15, borderRadius: 18, backgroundColor: SPACE_CADET.surface2, borderWidth: 1, borderColor: SPACE_CADET.borderSubtle }, badge: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center", marginBottom: 11 }, badgeText: { color: SPACE_CADET.black, fontFamily: "Gontserrat-SemiBold", fontSize: 10 }, category: { fontFamily: "Gontserrat-Regular", fontSize: 9, letterSpacing: 1.1, textTransform: "uppercase", marginBottom: 5 }, cardTitle: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Regular", fontSize: 15, lineHeight: 19 }, cardDescription: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 11, lineHeight: 15, marginTop: 6 }, pressed: { transform: [{ scale: 0.97 }] },
   missionWrap: { marginBottom: 12 }, missionBorder: { borderRadius: 18, padding: 1.5 }, missionInner: { borderRadius: 16.5, backgroundColor: SPACE_CADET.black, paddingVertical: 16, paddingHorizontal: 16 }, missionKicker: { color: SPACE_CADET.white, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.8 }, missionTitle: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 22, marginTop: 4 }, missionText: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 12, lineHeight: 17, marginTop: 5 },
-  cardTop: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }, todayTag: { color: SPACE_CADET.white, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 1.4, marginTop: 4 },
   gameOverlay: { ...StyleSheet.absoluteFill, zIndex: 40, backgroundColor: SPACE_CADET.black },
 });

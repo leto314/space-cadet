@@ -8,6 +8,7 @@ import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
+import { createRandom, deriveSeed, hashString } from "../../utils/random";
 import { buildPuzzle, GLYPHS, levelForIndex, VIEW_SLOTS } from "./cubeNets";
 
 const ACCENT = SPACE_CADET.spatial;
@@ -23,6 +24,28 @@ const MODE_CYCLE = ["fold", "refold", "unfold"];
 const QUESTIONS = { fold: "WHICH CUBE DOES THIS NET MAKE?", refold: "WHICH NET MAKES THE SAME CUBE?", unfold: "WHICH NET MAKES THIS CUBE?" };
 const FACE_FILLS = ["#1D1D21", "#131316", "#0A0A0C"];
 const GLYPH_STROKE = 0.8;
+
+// Daily training: the same eight puzzles for everyone, every exercise tested, easy to hard.
+export const DAILY_PUZZLES = [
+  { mode: "fold", level: "easy" }, { mode: "refold", level: "easy" }, { mode: "unfold", level: "easy" },
+  { mode: "fold", level: "medium" }, { mode: "refold", level: "medium" }, { mode: "unfold", level: "medium" },
+  { mode: "fold", level: "hard" }, { mode: "unfold", level: "hard" },
+];
+// The ready screen's illustration: a net and the cube it folds into, the same every time.
+const SAMPLE = buildPuzzle("fold", "easy", createRandom(hashString("cube-nets:sample")));
+const SAMPLE_CUBE = SAMPLE.options[SAMPLE.answerIndex].view;
+const DAILY_SETTINGS = { mode: "mixed", puzzleCount: DAILY_PUZZLES.length, difficulty: "progressive" };
+// Each puzzle has its own seeded stream; a draw that fails to produce four distinct options (rare) moves on to
+// the next stream, so every player still gets the same eight puzzles.
+export function buildDailyPuzzles(seed) {
+  return DAILY_PUZZLES.map(({ mode, level }, index) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const puzzle = buildPuzzle(mode, level, createRandom(deriveSeed(seed, `puzzle-${index}:${attempt}`)));
+      if (puzzle) return puzzle;
+    }
+    return null;
+  }).filter(Boolean);
+}
 
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const neg = (a) => [-a[0], -a[1], -a[2]];
@@ -70,17 +93,19 @@ export function CubeView({ view, size }) {
   </Svg>;
 }
 
-export function CubeNetsGame({ onExit }) {
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's eight
+// puzzles (DAILY_PUZZLES), 125 points each, then onFinish({ score, metrics, trials }).
+export function CubeNetsGame({ onExit, daily = null }) {
   const [mode, setMode] = useState("fold");
   const [puzzleCount, setPuzzleCount] = useState(8);
   const [difficulty, setDifficulty] = useState("medium");
-  const [phase, setPhase] = useState("preflight");
+  const [phase, setPhase] = useState(daily ? "ready" : "preflight");
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [results, setResults] = useState([]);
-  const phaseRef = useRef("preflight");
-  const settingsRef = useRef(null);
+  const phaseRef = useRef(daily ? "ready" : "preflight");
+  const settingsRef = useRef(daily ? DAILY_SETTINGS : null);
   const puzzlesRef = useRef([]);
   const resultsRef = useRef([]);
   const sessionStartedAt = useRef(0);
@@ -100,7 +125,7 @@ export function CubeNetsGame({ onExit }) {
   function beginRun() {
     void triggerSelectionHaptic();
     const { mode: chosen, puzzleCount: total, difficulty: grade } = settingsRef.current;
-    puzzlesRef.current = Array.from({ length: total }, (_, position) => buildPuzzle(chosen === "mixed" ? MODE_CYCLE[position % MODE_CYCLE.length] : chosen, levelForIndex(grade, position, total))).filter(Boolean);
+    puzzlesRef.current = daily ? buildDailyPuzzles(daily.seed) : Array.from({ length: total }, (_, position) => buildPuzzle(chosen === "mixed" ? MODE_CYCLE[position % MODE_CYCLE.length] : chosen, levelForIndex(grade, position, total))).filter(Boolean);
     sessionStartedAt.current = Date.now();
     intervalRef.current = setInterval(() => setElapsed(Date.now() - sessionStartedAt.current), 100);
     showPuzzle(0);
@@ -114,8 +139,18 @@ export function CubeNetsGame({ onExit }) {
     void (correct ? triggerSuccessHaptic() : triggerErrorHaptic());
     timeouts.current.push(setTimeout(() => {
       if (index + 1 < puzzlesRef.current.length) showPuzzle(index + 1);
-      else { clearInterval(intervalRef.current); intervalRef.current = null; goTo("summary"); }
+      else { clearInterval(intervalRef.current); intervalRef.current = null; if (daily) finishDaily(); else goTo("summary"); }
     }, correct ? CORRECT_PAUSE_MS : WRONG_PAUSE_MS));
+  }
+  function finishDaily() {
+    const entries = resultsRef.current;
+    const correctIn = (key) => entries.filter((entry) => entry.mode === key && entry.correct).length;
+    const correct = entries.filter((entry) => entry.correct).length;
+    daily.onFinish({
+      score: Math.round((correct / entries.length) * 1000),
+      metrics: { correct, puzzles: entries.length, netToCube: correctIn("fold"), netToNet: correctIn("refold"), cubeToNet: correctIn("unfold"), meanAnswerMs: Math.round(entries.reduce((sum, entry) => sum + entry.timeMs, 0) / entries.length) },
+      trials: entries.map((entry) => ({ ok: entry.correct ? 1 : 0, ms: entry.timeMs, mode: entry.mode, level: entry.level })),
+    });
   }
 
   const preflight = <GameSetupShell title="Cube Nets" categoryKey="spatial" onExit={onExit} onStart={prepareRun} rules="Tests mental folding. A cube is shown unfolded, seen from the outside, with a letter or digit on each face. The way each character is turned matters.Net → Cube: Pick the cube this net folds into.Net → Net: Pick the other net that folds into the same cube.Cube → Net: The same cube is shown from three corners. Pick the net that makes it.Easy: Wrong answers put opposite faces side by side.Medium: Some wrong answers have the right faces arranged the other way round.Hard: Some wrong answers differ only by one character turned. Progressive starts easy and ends hard.">
@@ -139,15 +174,20 @@ export function CubeNetsGame({ onExit }) {
 
   return <View style={styles.container}>
     {phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}
-    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, missionStyle]}>
-      <View style={styles.header}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
+    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, !daily && missionStyle]}>
+      <View style={styles.header}><Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
 
       {phase === "ready" ? <Pressable onPress={beginRun} style={styles.readyScreen}>
-        <Text style={styles.kicker}>SPATIAL ORIENTATION</Text>
+        <Text style={styles.kicker}>{daily ? "DAILY TRAINING" : "SPATIAL ORIENTATION"}</Text>
         <Text style={styles.readyTitle}>Ready to fold the cube?</Text>
-        <Text style={styles.readyText}>{settings.mode === "fold" ? "A net is shown from the outside. Pick the cube it folds into." : settings.mode === "refold" ? "A net is shown from the outside. Pick the other net that folds into the same cube." : settings.mode === "unfold" ? "One cube is shown from three different corners. Pick the net that folds into it." : "Net to cube, net to net, then cube to net: the three exercises alternate."}</Text>
+        <Text style={styles.readyText}>{daily ? "Net to cube, net to net, then cube to net: eight puzzles, each exercise tested, harder as you go." : settings.mode === "fold" ? "A net is shown from the outside. Pick the cube it folds into." : settings.mode === "refold" ? "A net is shown from the outside. Pick the other net that folds into the same cube." : settings.mode === "unfold" ? "One cube is shown from three different corners. Pick the net that folds into it." : "Net to cube, net to net, then cube to net: the three exercises alternate."}</Text>
+        <View style={styles.sample}>
+          <NetView net={SAMPLE.net} maxWidth={150} maxHeight={110} maxCell={34} />
+          <Svg width="26" height="14" viewBox="0 0 26 14" style={styles.sampleArrow}><Path d="M1 7h22M18 2l5 5-5 5" stroke={ACCENT} strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" /></Svg>
+          <CubeView view={SAMPLE_CUBE} size={96} />
+        </View>
         <View style={styles.cueCard}>
-          <Text style={styles.cueLabel}>{settings.puzzleCount} PUZZLES · {MODE_LABELS[settings.mode]}</Text>
+          <Text style={styles.cueLabel}>{settings.puzzleCount} PUZZLES · {daily ? "ALL THREE EXERCISES" : MODE_LABELS[settings.mode]}</Text>
           <Text style={styles.cueText}>{settings.difficulty === "progressive" ? "Difficulty rises from easy to hard." : `${LEVEL_LABELS[settings.difficulty]} difficulty`}{"\n"}Mind how each character is turned.</Text>
         </View>
         <PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt>
@@ -199,8 +239,9 @@ const styles = StyleSheet.create({
   header: { height: 64, paddingHorizontal: 20, justifyContent: "center" }, backButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" }, backArrow: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 32, lineHeight: 36 }, pressed: { transform: [{ scale: 0.97 }] },
   kicker: { color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.9, textAlign: "center" },
   readyScreen: { flex: 1, alignItems: "center", paddingHorizontal: 28, paddingTop: 54 }, readyTitle: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 30, marginTop: 9, textAlign: "center" }, readyText: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 14, lineHeight: 21, maxWidth: 300, textAlign: "center", marginTop: 12 },
-  cueCard: { width: "100%", borderRadius: 22, paddingVertical: 22, paddingHorizontal: 22, alignItems: "center", backgroundColor: SPACE_CADET.surface1, marginTop: 52 }, cueLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.6 }, cueText: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Regular", fontSize: 14, lineHeight: 21, textAlign: "center", marginTop: 12 },
-  beginPrompt: { marginTop: 48, textAlign: "center" },
+  sample: { flexDirection: "row", alignItems: "center", marginTop: 30 }, sampleArrow: { marginHorizontal: 14 },
+  cueCard: { width: "100%", borderRadius: 22, paddingVertical: 18, paddingHorizontal: 22, alignItems: "center", backgroundColor: SPACE_CADET.surface1, marginTop: 30 }, cueLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.6 }, cueText: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Regular", fontSize: 14, lineHeight: 21, textAlign: "center", marginTop: 12 },
+  beginPrompt: { marginTop: 34, textAlign: "center" },
   playScreen: { flex: 1, paddingHorizontal: 20, paddingBottom: 48 }, statusRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 16 }, statusRight: { alignItems: "flex-end" }, statusLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 1.5 }, statusValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 28, marginTop: 3 }, statusTotal: { color: SPACE_CADET.textTertiary, fontSize: 18 },
   board: { flex: 1, alignItems: "center", justifyContent: "center" }, levelTag: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 1.6, marginBottom: 12 }, netArea: { justifyContent: "center" }, viewRow: { flexDirection: "row" },
   sectionLabel: { color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.7, marginTop: 22, marginBottom: 14, textAlign: "center" },

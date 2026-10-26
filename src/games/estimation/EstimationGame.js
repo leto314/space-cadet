@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { PanResponder, Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import Animated, { FadeIn } from "react-native-reanimated";
 import Svg, { Circle, Line } from "react-native-svg";
 import { ChoiceButton, ChoiceRow, GameSetupShell, SettingCard, TapePicker } from "../../components/GameSetupShell";
@@ -7,6 +7,7 @@ import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
+import { createRandom, deriveSeed, randomTools } from "../../utils/random";
 
 const ACCENT = SPACE_CADET.mentalMath;
 const SUCCESS = "#34D399";
@@ -17,12 +18,43 @@ const TYPES = [
   { value: "points", label: "DOT COUNT" }, { value: "angle", label: "ANGLES" },
 ];
 export const EXERCISE_TYPES = TYPES.filter((item) => item.value !== "all").map((item) => item.value);
-// Problems draw from `rng`, which buildProblem points at an injected generator (seeded in missions).
+// Problems draw from `rng`, which buildProblem points at an injected generator (seeded in missions and in the daily).
 let rng = Math.random;
 const randomInt = (min, max) => Math.floor(rng() * (max - min + 1)) + min;
 const randomItem = (items) => items[Math.floor(rng() * items.length)];
 const formatTime = (value) => Math.floor(value / 60) + ":" + String(value % 60).padStart(2, "0");
 const formatNumber = (value) => Math.round(value).toLocaleString("en-US");
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+// Timing: how long the dots stay on screen before they are hidden, the limit to answer one estimate (whatever
+// is typed is then submitted), and the pause showing the target and the points.
+const LOOK_MS = 4000;
+const ANSWER_LIMIT_MS = 15000;
+const FEEDBACK_MS = 1100;
+
+// Points of an estimate (0–100) from its relative error: 100 within the `full` band, then falling evenly to 0
+// at the `zero` band, both set per type (counting dots or reading an angle is harder to nail than 20 % of 300).
+// Compare questions are right or wrong. No time weighting: the limit above is the only clock.
+//   dots, 15 blue: 13–17 → 100 · 12 or 18 → 80 · 19 → 53 · 10 → 27 · 8 or 22 → 0
+export const TOLERANCES = {
+  multiply: { full: 0.04, zero: 0.28 }, divide: { full: 0.04, zero: 0.28 }, percent: { full: 0.03, zero: 0.25 }, sum: { full: 0.03, zero: 0.2 },
+  increase: { full: 0.08, zero: 0.4 }, missing: { full: 0.05, zero: 0.3 }, points: { full: 0.15, zero: 0.4 }, angle: { full: 0.06, zero: 0.3 },
+};
+export function estimatePoints(problem, answer) {
+  if (answer === null || answer === undefined || Number.isNaN(answer)) return 0;
+  if (problem.type === "compare") return answer === problem.target ? 100 : 0;
+  const { full, zero } = TOLERANCES[problem.type];
+  const error = Math.abs(answer - problem.target) / Math.max(1, Math.abs(problem.target));
+  return clamp(Math.round(100 * clamp(1 - (error - full) / (zero - full), 0, 1)), 0, 100);
+}
+
+// Daily training: twelve estimates for everyone, every type once plus three more, in a seeded order.
+export const DAILY_COUNT = 12;
+export function buildDailyProblems(seed) {
+  const rnd = randomTools(createRandom(seed));
+  const types = rnd.shuffle([...EXERCISE_TYPES, ...Array.from({ length: DAILY_COUNT - EXERCISE_TYPES.length }, () => rnd.item(EXERCISE_TYPES))]);
+  return types.map((type, index) => buildProblem([type], createRandom(deriveSeed(seed, `estimate-${index}`))));
+}
 
 function buildPoints() {
   const count = randomInt(18, 48);
@@ -79,90 +111,120 @@ function ReadyPreview({ problem }) {
   return <Text style={styles.readyExpression}>{problem.prompt.replace(" ≈ ?", "")}</Text>;
 }
 
-export function EstimationGame({ onExit }) {
+
+function NumberPad({ onDigit, onDelete, onSubmit, disabled }) {
+  return <View style={styles.keypad}>{[1, 2, 3, 4, 5, 6, 7, 8, 9].map((number) => <TouchableOpacity key={number} activeOpacity={0.82} disabled={disabled} onPressIn={() => onDigit(String(number))} style={styles.key}><Text style={styles.keyText}>{number}</Text></TouchableOpacity>)}<TouchableOpacity activeOpacity={0.82} disabled={disabled} onPressIn={onDelete} style={styles.key}><Text style={styles.keyAction}>DELETE</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.82} disabled={disabled} onPressIn={() => onDigit("0")} style={styles.key}><Text style={styles.keyText}>0</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.82} disabled={disabled} onPressIn={onSubmit} style={[styles.key, styles.submitKey]}><Text style={styles.submitKeyText}>ENTER</Text></TouchableOpacity></View>;
+}
+
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's twelve
+// estimates, then onFinish({ score, metrics, trials }).
+export function EstimationGame({ onExit, daily = null }) {
   const [duration, setDuration] = useState(1);
   const [selectedTypes, setSelectedTypes] = useState(["all"]);
-  const [phase, setPhase] = useState("preflight");
+  const [phase, setPhase] = useState(daily ? "ready" : "preflight");
   const [remaining, setRemaining] = useState(60);
+  const [answerLeft, setAnswerLeft] = useState(ANSWER_LIMIT_MS / 1000);
   const [problem, setProblem] = useState(null);
-  const [readyProblem, setReadyProblem] = useState(null);
-  const [answer, setAnswer] = useState(0);
-  const [joystick, setJoystick] = useState(0);
-  const [feedback, setFeedback] = useState(null);
-  const [range, setRange] = useState(null);
-  const [results, setResults] = useState([]);
-  const timers = useRef([]); const intervalRef = useRef(null); const activeRef = useRef(false); const pausedRef = useRef(false); const lockedRef = useRef(false); const answerRef = useRef(0); const joystickRef = useRef(0); const problemRef = useRef(null); const startedAt = useRef(0); const configRef = useRef([]); const submitRef = useRef(null);
+  const [problemIndex, setProblemIndex] = useState(0);
+  const [stage, setStage] = useState("answer");
+  const [readyProblem, setReadyProblem] = useState(() => daily ? buildDailyProblems(deriveSeed(daily.seed, "estimates"))[0] : null);
+  const [typed, setTyped] = useState("");
+  const [outcome, setOutcome] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const timers = useRef([]); const intervalRef = useRef(null); const answerIntervalRef = useRef(null); const activeRef = useRef(false); const pausedRef = useRef(false); const lockedRef = useRef(false); const typedRef = useRef(""); const problemRef = useRef(null); const problemIndexRef = useRef(0); const startedAt = useRef(0); const configRef = useRef([]); const rndRef = useRef(null); const dailyRef = useRef([]); const resultsRef = useRef([]); const finishedRef = useRef(false);
   const { isReturning, missionStyle, preflightStyle, startMission, returnToPreflight } = useMissionTransition({ onPrepareReturn: clearTimers, onReturnComplete: resetToPreflight });
   useEffect(() => () => clearTimers(), []);
-  function clearTimers() { clearInterval(intervalRef.current); intervalRef.current = null; timers.current.forEach(clearTimeout); timers.current = []; activeRef.current = false; pausedRef.current = false; }
+  function clearTimers() { clearInterval(intervalRef.current); intervalRef.current = null; clearInterval(answerIntervalRef.current); answerIntervalRef.current = null; timers.current.forEach(clearTimeout); timers.current = []; activeRef.current = false; pausedRef.current = false; }
   function queue(callback, delay) { timers.current.push(setTimeout(callback, delay)); }
   function typesForSession() { return configRef.current.includes("all") ? EXERCISE_TYPES : configRef.current; }
-  function resetToPreflight() { clearTimers(); setPhase("preflight"); setProblem(null); setFeedback(null); setRange(null); setAnswer(0); }
-  function resetToReady() { clearTimers(); setFeedback(null); setRange(null); setProblem(null); setAnswer(0); setReadyProblem(buildProblem(selectedTypes.includes("all") ? EXERCISE_TYPES : selectedTypes)); setPhase("ready"); }
-  function showProblem() { const next = buildProblem(typesForSession()); problemRef.current = next; setProblem(next); setAnswer(0); answerRef.current = 0; setJoystick(0); joystickRef.current = 0; setFeedback(null); setRange(null); pausedRef.current = false; lockedRef.current = false; startedAt.current = Date.now(); }
-  function finishGame() { clearTimers(); setPhase("summary"); }
+  function resetToPreflight() { clearTimers(); setPhase("preflight"); setProblem(null); setOutcome(null); setSummary(null); }
+  function resetToReady() { clearTimers(); setOutcome(null); setSummary(null); setProblem(null); rndRef.current = randomTools(createRandom(Math.floor(Math.random() * 4294967296))); setReadyProblem(buildProblem(selectedTypes.includes("all") ? EXERCISE_TYPES : selectedTypes, rndRef.current.random)); setPhase("ready"); }
+  function setInput(value) { typedRef.current = value; setTyped(value); }
+  function showProblem(index) {
+    let next;
+    if (daily) { next = dailyRef.current[index]; if (!next) { finishGame(); return; } }
+    else next = buildProblem(typesForSession(), rndRef.current.random);
+    problemRef.current = next; problemIndexRef.current = index; setProblem(next); setProblemIndex(index); setInput(""); setOutcome(null); lockedRef.current = false;
+    clearInterval(answerIntervalRef.current); answerIntervalRef.current = null;
+    if (next.type === "points") { setStage("look"); pausedRef.current = true; queue(() => openAnswer(next), LOOK_MS); }
+    else openAnswer(next);
+  }
+  function openAnswer(current) {
+    if (problemRef.current !== current) return;
+    setStage("answer"); pausedRef.current = false; startedAt.current = Date.now(); setAnswerLeft(ANSWER_LIMIT_MS / 1000);
+    answerIntervalRef.current = setInterval(() => {
+      const left = ANSWER_LIMIT_MS - (Date.now() - startedAt.current);
+      setAnswerLeft(Math.max(0, Math.ceil(left / 1000)));
+      if (left <= 0) submit(typedRef.current === "" ? null : Number(typedRef.current));
+    }, 250);
+  }
+  function finishGame() {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    clearTimers();
+    const entries = resultsRef.current;
+    const points = entries.reduce((sum, entry) => sum + entry.pts, 0);
+    const outcomeSummary = { estimates: entries.length, score: entries.length ? clamp(Math.round((points / entries.length) * 10), 0, 1000) : 0, meanPoints: entries.length ? Math.round(points / entries.length) : 0, close: entries.filter((entry) => entry.pts >= 80).length, meanMs: entries.length ? Math.round(entries.reduce((sum, entry) => sum + entry.ms, 0) / entries.length) : null };
+    if (daily) { daily.onFinish({ score: clamp(Math.round(points * (1000 / (DAILY_COUNT * 100))), 0, 1000), metrics: { estimates: entries.length, close: outcomeSummary.close, meanPoints: outcomeSummary.meanPoints, meanMs: outcomeSummary.meanMs, unanswered: entries.filter((entry) => entry.answer === null).length }, trials: entries }); return; }
+    setSummary(outcomeSummary); setPhase("summary");
+  }
   function startGame() {
-    clearTimers(); activeRef.current = true; setResults([]); setRemaining(duration * 60); setPhase("playing"); showProblem();
-    intervalRef.current = setInterval(() => setRemaining((current) => { if (pausedRef.current) return current; if (current <= 1) { finishGame(); return 0; } return current - 1; }), 1000);
-    const adjustmentInterval = setInterval(() => {
-      const activeProblem = problemRef.current;
-      if (!activeRef.current || !activeProblem || activeProblem.type === "compare" || lockedRef.current) return;
-      const strength = Math.abs(joystickRef.current);
-      if (strength < 0.04) return;
-      const delta = Math.sign(joystickRef.current) * activeProblem.step * (0.055 + strength ** 2.5 * 7.6);
-      const next = Math.max(-99999, Math.min(99999, Math.round((answerRef.current + delta) / activeProblem.step) * activeProblem.step));
-      answerRef.current = next; setAnswer(next);
-    }, 55);
-    timers.current.push(adjustmentInterval);
+    clearTimers(); finishedRef.current = false; resultsRef.current = []; activeRef.current = true;
+    if (daily) dailyRef.current = buildDailyProblems(deriveSeed(daily.seed, "estimates"));
+    else { setRemaining(duration * 60); intervalRef.current = setInterval(() => setRemaining((current) => { if (pausedRef.current) return current; if (current <= 1) { finishGame(); return 0; } return current - 1; }), 1000); }
+    setPhase("playing"); showProblem(0);
   }
-  function submit(finalAnswer = answerRef.current) {
-    const activeProblem = problemRef.current;
-    if (!activeRef.current || !activeProblem || lockedRef.current || phase !== "playing") return;
+  function submit(answer) {
+    const current = problemRef.current;
+    if (!activeRef.current || !current || lockedRef.current || finishedRef.current) return;
     lockedRef.current = true;
-    const responseTime = Date.now() - startedAt.current;
-    const accepted = acceptedRange(activeProblem);
-    const correct = activeProblem.type === "compare" ? finalAnswer === activeProblem.target : finalAnswer >= accepted.lower && finalAnswer <= accepted.upper;
-    const precision = activeProblem.type === "compare" ? (correct ? 1 : 0) : Math.max(0, 1 - Math.abs(finalAnswer - activeProblem.target) / (Math.max(1, Math.abs(activeProblem.target)) * 0.3));
+    clearInterval(answerIntervalRef.current); answerIntervalRef.current = null;
+    const pts = estimatePoints(current, answer);
     pausedRef.current = true;
-    setRange(accepted); setFeedback(correct ? "success" : "error");
-    if (correct) void triggerSuccessHaptic(); else void triggerErrorHaptic();
-    setResults((current) => [...current, { precision, responseTime }]);
-    queue(showProblem, 1000);
+    resultsRef.current = [...resultsRef.current, { type: current.type, answer, target: current.target, pts, ms: Date.now() - startedAt.current }];
+    setOutcome({ pts, answer });
+    void (pts >= 50 ? triggerSuccessHaptic() : triggerErrorHaptic());
+    queue(() => showProblem(problemIndexRef.current + 1), FEEDBACK_MS);
   }
-  submitRef.current = submit;
-  const panResponder = useRef(PanResponder.create({
-    onStartShouldSetPanResponder: () => activeRef.current && !lockedRef.current, onMoveShouldSetPanResponder: () => activeRef.current && !lockedRef.current,
-    onPanResponderGrant: () => void triggerSelectionHaptic(),
-    onPanResponderMove: (_, gesture) => { const target = Math.max(-1, Math.min(1, gesture.dx / 145)); joystickRef.current = target; setJoystick((current) => current + (target - current) * 0.34); },
-    onPanResponderRelease: () => { const current = problemRef.current; const released = joystickRef.current; joystickRef.current = 0; setJoystick(0); if (current?.type === "compare" && Math.abs(released) > 0.28) submitRef.current?.(released < 0 ? -1 : 1); },
-    onPanResponderTerminate: () => { joystickRef.current = 0; setJoystick(0); },
-  })).current;
+  function digit(value) { if (lockedRef.current) return; void triggerSelectionHaptic(); setInput(`${typedRef.current}${value}`.slice(0, 6)); }
+  function erase() { if (lockedRef.current) return; void triggerSelectionHaptic(); setInput(typedRef.current.slice(0, -1)); }
+  function enter() { if (typedRef.current === "") return; submit(Number(typedRef.current)); }
   function toggleType(value) { void triggerSelectionHaptic(); if (value === "all") { setSelectedTypes(["all"]); return; } setSelectedTypes((current) => { const values = current.includes("all") ? [] : current; const next = values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; if (!next.length) return current; return next.length === EXERCISE_TYPES.length ? ["all"] : next; }); }
-  const summary = useMemo(() => { const accuracy = results.length ? Math.round(results.reduce((sum, item) => sum + item.precision, 0) * 100 / results.length) : 0; const average = results.length ? Math.round(results.reduce((sum, item) => sum + item.responseTime, 0) / results.length) : null; const score = Math.round(results.reduce((sum, item) => sum + item.precision * (1.2 - Math.min(item.responseTime, 12000) / 60000), 0) * 100); return { accuracy, average, score }; }, [results]);
-  const knobStyle = { transform: [{ translateX: joystick * 108 }] };
-  const fillStyle = joystick >= 0 ? { left: "50%", width: joystick * 50 + "%" } : { left: 50 + joystick * 50 + "%", width: Math.abs(joystick) * 50 + "%" };
+
   const typeButton = (item) => <ChoiceButton key={item.value} label={item.label} compact selected={selectedTypes.includes(item.value)} accent={ACCENT} onPress={() => toggleType(item.value)} />;
-  const preflight = <GameSetupShell title="Estimation" categoryKey="mentalMath" onExit={onExit} onStart={() => { configRef.current = selectedTypes; startMission(resetToReady); }} rules="Tests fast numerical and visual estimation. Adjust your estimate with the precision control, then submit it. Answers within the accepted range count as correct. Select one or more exercise types to focus your training."><SettingCard label="Duration" hint="In minutes"><TapePicker options={[1, 2, 3, 4, 5].map((value) => ({ value, label: String(value) }))} value={duration} onChange={setDuration} /></SettingCard><SettingCard label="Estimation types" hint="Select one or more types."><View style={styles.typeRows}><ChoiceRow>{TYPES.slice(0, 4).map(typeButton)}</ChoiceRow><ChoiceRow>{TYPES.slice(4, 8).map(typeButton)}</ChoiceRow><ChoiceRow>{TYPES.slice(8).map(typeButton)}<View style={styles.typeSpacer} /><View style={styles.typeSpacer} /></ChoiceRow></View></SettingCard></GameSetupShell>;
+  const preflight = <GameSetupShell title="Estimation" categoryKey="mentalMath" onExit={onExit} onStart={() => { configRef.current = selectedTypes; startMission(resetToReady); }} rules="Tests fast numerical and visual estimation. Type your estimate and enter it: the closer, the more points, up to 100 per estimate (full points within a small band, then falling evenly to 0 at a band set per type). Dots are shown for four seconds, then hidden. Fifteen seconds per estimate. Select one or more exercise types to focus your training."><SettingCard label="Duration" hint="In minutes"><TapePicker options={[1, 2, 3, 4, 5].map((value) => ({ value, label: String(value) }))} value={duration} onChange={setDuration} /></SettingCard><SettingCard label="Estimation types" hint="Select one or more types."><View style={styles.typeRows}><ChoiceRow>{TYPES.slice(0, 4).map(typeButton)}</ChoiceRow><ChoiceRow>{TYPES.slice(4, 8).map(typeButton)}</ChoiceRow><ChoiceRow>{TYPES.slice(8).map(typeButton)}<View style={styles.typeSpacer} /><View style={styles.typeSpacer} /></ChoiceRow></View></SettingCard></GameSetupShell>;
+
+  const unit = problem?.type === "increase" ? "%" : problem?.type === "angle" ? "°" : "";
+  const feedbackColor = outcome ? (outcome.pts >= 50 ? SUCCESS : ERROR) : null;
   return <View style={styles.container}>
     {phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}
-    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, missionStyle]}>
-      <View style={styles.header}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
-      {phase === "ready" ? <Pressable style={styles.readyScreen} onPress={startGame}><Text style={styles.kicker}>ESTIMATION</Text><Text style={styles.readyTitle}>Trust your first read.</Text><Text style={styles.readyText}>Make a close estimate. Precision and pace both count.</Text><PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt><View style={styles.readyPreview}><ReadyPreview problem={readyProblem} /></View></Pressable> : null}
-      {phase === "playing" && problem ? <Animated.View entering={FadeIn.duration(160)} style={styles.playScreen}>
-        <View style={styles.statusRow}><View><Text style={styles.statusLabel}>TIME LEFT</Text><Text style={styles.statusValue}>{formatTime(remaining)}</Text></View><View style={styles.scoreBlock}><Text style={styles.statusLabel}>ESTIMATES</Text><Text style={styles.statusValue}>{results.length}</Text></View></View>
-        <View style={styles.problemArea}><Text style={styles.problemKicker}>{problem.title}</Text><Text style={styles.problemText}>{problem.prompt}</Text>{problem.type === "points" ? <DotBoard points={problem.points} /> : null}{problem.type === "angle" ? <AngleDiagram angle={problem.angle} /> : null}{problem.type === "compare" ? <View style={styles.compareRow}>{problem.compareLabels.map((label, index) => <Text key={label} style={styles.compareValue}>{index === 0 ? "←" : "→"} {label}</Text>)}</View> : <View style={[styles.answerDisplay, feedback === "success" && styles.answerSuccess, feedback === "error" && styles.answerError]}><Text style={[styles.answerText, feedback === "success" && styles.answerTextSuccess, feedback === "error" && styles.answerTextError]}>{formatNumber(answer)}</Text>{problem.type === "increase" ? <Text style={[styles.answerUnit, feedback === "success" && styles.answerTextSuccess, feedback === "error" && styles.answerTextError]}>%</Text> : null}</View>}{range ? <Animated.View entering={FadeIn.duration(120)} style={styles.rangeReadout}><Text style={styles.rangeLabel}>ACCEPTED RANGE</Text><Text style={styles.rangeValue}>{formatNumber(range.lower)} — {formatNumber(range.upper)}</Text></Animated.View> : null}</View>
-        <View style={styles.controlSection}><Text style={styles.controlHint}>{problem.type === "compare" ? "Drag left or right, then release" : "Hold and drag to adjust"}</Text><View style={styles.track} {...panResponder.panHandlers}><View style={[styles.trackFill, fillStyle]} /><Text style={styles.trackSideLeft}>{problem.type === "compare" ? "LEFT" : "−"}</Text><Text style={styles.trackSideRight}>{problem.type === "compare" ? "RIGHT" : "+"}</Text><View style={styles.trackCenter} /><View style={[styles.trackKnob, knobStyle]} /></View>{problem.type !== "compare" ? <TouchableOpacity disabled={Boolean(feedback)} activeOpacity={0.86} onPress={() => submit()} style={[styles.submitButton, feedback && styles.disabledButton]}><Text style={styles.submitText}>SUBMIT ESTIMATE</Text></TouchableOpacity> : null}</View>
+    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, !daily && missionStyle]}>
+      <View style={styles.header}><Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
+      {phase === "ready" ? <Pressable style={styles.readyScreen} onPress={startGame}><Text style={styles.kicker}>{daily ? "DAILY TRAINING" : "ESTIMATION"}</Text><Text style={styles.readyTitle}>Trust your first read.</Text><Text style={styles.readyText}>{daily ? `${DAILY_COUNT} estimates of every kind, up to 100 points each: the closer, the more. Fifteen seconds per estimate.` : "Make a close estimate: the closer, the more points."}</Text><PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt><View style={styles.readyPreview}><ReadyPreview problem={readyProblem} /></View></Pressable> : null}
+      {phase === "playing" && problem ? <Animated.View key={problemIndex} entering={FadeIn.duration(160)} style={styles.playScreen}>
+        <View style={styles.statusRow}><View><Text style={styles.statusLabel}>{daily ? "ESTIMATE" : "TIME LEFT"}</Text><Text style={styles.statusValue}>{daily ? <>{problemIndex + 1}<Text style={styles.statusTotal}> / {DAILY_COUNT}</Text></> : formatTime(remaining)}</Text></View><View style={styles.scoreBlock}><Text style={styles.statusLabel}>{stage === "look" ? "MEMORISE" : "ANSWER IN"}</Text><Text style={styles.statusValue}>{stage === "look" ? " " : `${answerLeft} s`}</Text></View></View>
+        <View style={styles.problemArea}>
+          <Text style={styles.problemKicker}>{problem.title}</Text>
+          <Text style={styles.problemText}>{stage === "look" ? "Look carefully…" : problem.prompt}</Text>
+          {problem.type === "points" && stage === "look" ? <DotBoard points={problem.points} /> : null}
+          {problem.type === "angle" ? <AngleDiagram angle={problem.angle} /> : null}
+          {problem.type === "compare" ? <View style={styles.compareRow}>{problem.compareLabels.map((label, index) => <Text key={label} style={[styles.compareValue, outcome && (problem.target === (index === 0 ? -1 : 1) ? { color: SUCCESS } : outcome.answer === (index === 0 ? -1 : 1) ? { color: ERROR } : null)]}>{index === 0 ? "← " : ""}{label}{index === 1 ? " →" : ""}</Text>)}</View> : null}
+          {problem.type !== "compare" && stage === "answer" ? <View style={[styles.answerDisplay, outcome && { borderBottomColor: feedbackColor }]}><Text style={[styles.answerText, outcome && { color: feedbackColor }]}>{typed === "" ? " " : formatNumber(Number(typed))}</Text>{unit && typed !== "" ? <Text style={[styles.answerUnit, outcome && { color: feedbackColor }]}>{unit}</Text> : null}</View> : null}
+          {outcome ? <Animated.View entering={FadeIn.duration(120)} style={styles.rangeReadout}><Text style={styles.rangeLabel}>{problem.type === "compare" ? `ANSWER · ${problem.target === -1 ? "LEFT" : "RIGHT"}` : `TARGET · ${formatNumber(problem.target)}${unit}`}</Text><Text style={[styles.rangeValue, { color: feedbackColor }]}>{outcome.pts} points</Text></Animated.View> : null}
+        </View>
+        {problem.type === "compare" ? <View style={styles.compareButtons}>{problem.compareLabels.map((label, index) => { const value = index === 0 ? -1 : 1; return <TouchableOpacity key={label} activeOpacity={0.85} disabled={Boolean(outcome)} onPress={() => submit(value)} style={[styles.compareButton, outcome && (problem.target === value ? styles.compareRight : outcome.answer === value ? styles.compareWrong : null)]}><Text style={styles.compareButtonText}>{index === 0 ? "LEFT" : "RIGHT"}</Text></TouchableOpacity>; })}</View>
+          : <NumberPad disabled={stage !== "answer" || Boolean(outcome)} onDigit={digit} onDelete={erase} onSubmit={enter} />}
       </Animated.View> : null}
-      {phase === "summary" ? <Animated.View entering={FadeIn.duration(180)} style={styles.summaryScreen}><Text style={styles.kicker}>SESSION ENDED</Text><Text style={styles.summaryTitle}>Training complete</Text><View style={styles.scoreSummaryRow}><Text style={styles.scoreNumber}>{summary.score}</Text><Text style={styles.scoreUnit}>POINTS</Text></View><View style={styles.resultCard}><Text style={styles.resultLine}>Estimates submitted <Text style={styles.resultValue}>{results.length}</Text></Text><Text style={styles.resultLine}>Average accuracy <Text style={styles.resultValue}>{summary.accuracy}%</Text></Text><Text style={styles.resultLine}>Average response <Text style={styles.resultValue}>{summary.average !== null ? summary.average + " ms" : "—"}</Text></Text></View><View style={styles.actions}><TouchableOpacity activeOpacity={0.88} onPress={startGame} style={styles.primaryButton}><Text style={styles.primaryText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.88} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryText}>Change settings</Text></TouchableOpacity></View></Animated.View> : null}
+      {phase === "summary" && summary ? <Animated.View entering={FadeIn.duration(180)} style={styles.summaryScreen}><Text style={styles.kicker}>SESSION ENDED</Text><Text style={styles.summaryTitle}>Training complete</Text><View style={styles.scoreSummaryRow}><Text style={styles.scoreNumber}>{summary.score}</Text><Text style={styles.scoreUnit}>/ 1000</Text></View><View style={styles.resultCard}><Text style={styles.resultLine}>Estimates submitted <Text style={styles.resultValue}>{summary.estimates}</Text></Text><Text style={styles.resultLine}>Average per estimate <Text style={styles.resultValue}>{summary.meanPoints} / 100</Text></Text><Text style={styles.resultLine}>Close estimates (80+) <Text style={styles.resultValue}>{summary.close}</Text></Text><Text style={styles.resultLine}>Average time <Text style={styles.resultValue}>{summary.meanMs !== null ? `${(summary.meanMs / 1000).toFixed(1)} s` : "—"}</Text></Text></View><View style={styles.actions}><TouchableOpacity activeOpacity={0.88} onPress={resetToReady} style={styles.primaryButton}><Text style={styles.primaryText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.88} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryText}>Change settings</Text></TouchableOpacity></View></Animated.View> : null}
     </Animated.View> : null}
   </View>;
 }
 
 const styles = StyleSheet.create({
   container:{flex:1,backgroundColor:SPACE_CADET.black},preflightLayer:{...StyleSheet.absoluteFill,zIndex:1},missionLayer:{flex:1,backgroundColor:SPACE_CADET.black,zIndex:2},header:{height:64,paddingHorizontal:20,justifyContent:"center"},backButton:{width:44,height:44,justifyContent:"center",alignItems:"center"},backArrow:{color:SPACE_CADET.white,fontFamily:"Gontserrat-Light",fontSize:32,lineHeight:36},pressed:{transform:[{scale:0.97}]},
-  typeRows:{gap:8},typeSpacer:{flex:1},kicker:{color:ACCENT,fontFamily:"Gontserrat-SemiBold",fontSize:10,letterSpacing:1.9,textAlign:"center"},readyScreen:{flex:1,alignItems:"center",paddingHorizontal:28,paddingTop:80},readyTitle:{color:SPACE_CADET.white,fontFamily:"Gontserrat-Light",fontSize:31,marginTop:9,textAlign:"center"},readyText:{color:SPACE_CADET.textSecondary,fontFamily:"Gontserrat-Regular",fontSize:14,lineHeight:21,maxWidth:296,textAlign:"center",marginTop:12},beginPrompt:{marginTop:43,textAlign:"center"},readyPreview:{width:230,height:178,marginTop:20,borderRadius:22,backgroundColor:SPACE_CADET.surface1,alignItems:"center",justifyContent:"center",overflow:"hidden"},readyExpression:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:25,textAlign:"center",paddingHorizontal:20},
+  typeRows:{gap:8},typeSpacer:{flex:1},kicker:{color:ACCENT,fontFamily:"Gontserrat-SemiBold",fontSize:10,letterSpacing:1.9,textAlign:"center"},readyScreen:{flex:1,alignItems:"center",paddingHorizontal:28,paddingTop:64},readyTitle:{color:SPACE_CADET.white,fontFamily:"Gontserrat-Light",fontSize:31,marginTop:9,textAlign:"center"},readyText:{color:SPACE_CADET.textSecondary,fontFamily:"Gontserrat-Regular",fontSize:14,lineHeight:21,maxWidth:296,textAlign:"center",marginTop:12},beginPrompt:{marginTop:43,textAlign:"center"},readyPreview:{width:230,height:178,marginTop:20,borderRadius:22,backgroundColor:SPACE_CADET.surface1,alignItems:"center",justifyContent:"center",overflow:"hidden"},readyExpression:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:25,textAlign:"center",paddingHorizontal:20},
   playScreen:{flex:1,paddingHorizontal:20,paddingBottom:24},statusRow:{flexDirection:"row",justifyContent:"space-between",marginTop:16},scoreBlock:{alignItems:"flex-end"},statusLabel:{color:SPACE_CADET.textTertiary,fontFamily:"Gontserrat-SemiBold",fontSize:9,letterSpacing:1.5},statusValue:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:28,marginTop:3},problemArea:{flex:1,alignItems:"center",justifyContent:"center",paddingBottom:16},problemKicker:{color:ACCENT,fontFamily:"Gontserrat-SemiBold",fontSize:10,letterSpacing:1.7,marginBottom:17},problemText:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:34,lineHeight:43,textAlign:"center",maxWidth:"100%"},answerDisplay:{minWidth:180,height:63,borderBottomWidth:1.5,borderBottomColor:SPACE_CADET.borderDefault,justifyContent:"center",alignItems:"center",flexDirection:"row",marginTop:24},answerSuccess:{borderBottomColor:SUCCESS},answerError:{borderBottomColor:ERROR},answerText:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:37,lineHeight:42,textAlign:"center"},answerUnit:{color:ACCENT,fontFamily:"Garet-Book",fontSize:26,marginLeft:5},answerTextSuccess:{color:SUCCESS,textShadowColor:SUCCESS,textShadowRadius:14,textShadowOffset:{width:0,height:0}},answerTextError:{color:ERROR,textShadowColor:ERROR,textShadowRadius:14,textShadowOffset:{width:0,height:0}},rangeReadout:{alignItems:"center",marginTop:18,minHeight:43},rangeLabel:{color:ACCENT,fontFamily:"Gontserrat-SemiBold",fontSize:9,letterSpacing:1.55},rangeValue:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:20,lineHeight:26,marginTop:2},
   dotBoard:{width:244,height:244,marginTop:21,borderRadius:22,backgroundColor:SPACE_CADET.surface1,position:"relative",overflow:"hidden"},dotBoardCompact:{width:162,height:124,marginTop:0,borderRadius:0,backgroundColor:"transparent"},dot:{position:"absolute",width:7,height:7,marginLeft:-3.5,marginTop:-3.5,borderRadius:4,opacity:0.86},dotCompact:{width:5,height:5,marginLeft:-2.5,marginTop:-2.5},angleBoard:{marginTop:13,height:152,justifyContent:"center",alignItems:"center"},angleBoardCompact:{height:124,marginTop:0},compareRow:{flexDirection:"row",gap:24,marginTop:30},compareValue:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:19,textAlign:"center"},
-  controlSection:{width:"100%"},controlHint:{color:SPACE_CADET.textSecondary,fontFamily:"Gontserrat-Regular",fontSize:12,textAlign:"center",marginBottom:13},track:{height:68,borderRadius:34,backgroundColor:SPACE_CADET.surface1,borderWidth:1,borderColor:SPACE_CADET.borderSubtle,justifyContent:"center",alignItems:"center",overflow:"hidden"},trackFill:{position:"absolute",height:"100%",backgroundColor:"#C46BFF30"},trackSideLeft:{position:"absolute",left:20,color:SPACE_CADET.textTertiary,fontFamily:"Gontserrat-SemiBold",fontSize:12,letterSpacing:1},trackSideRight:{position:"absolute",right:20,color:SPACE_CADET.textTertiary,fontFamily:"Gontserrat-SemiBold",fontSize:12,letterSpacing:1},trackCenter:{width:1,height:25,backgroundColor:"#C46BFF90"},trackKnob:{position:"absolute",width:52,height:52,borderRadius:26,backgroundColor:ACCENT,shadowColor:ACCENT,shadowOpacity:0.5,shadowRadius:11,shadowOffset:{width:0,height:0},elevation:4},submitButton:{height:52,borderRadius:999,backgroundColor:SPACE_CADET.white,alignItems:"center",justifyContent:"center",marginTop:12},disabledButton:{opacity:0.6},submitText:{color:SPACE_CADET.black,fontFamily:"Gontserrat-SemiBold",fontSize:11,letterSpacing:1.1},
+  keypad:{flexDirection:"row",flexWrap:"wrap",gap:9},key:{width:"31.3%",height:57,borderRadius:17,alignItems:"center",justifyContent:"center",backgroundColor:SPACE_CADET.surface1},keyText:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:24},keyAction:{color:SPACE_CADET.textSecondary,fontFamily:"Gontserrat-SemiBold",fontSize:9,letterSpacing:0.8},submitKey:{backgroundColor:SPACE_CADET.white},submitKeyText:{color:SPACE_CADET.black,fontFamily:"Gontserrat-SemiBold",fontSize:10,letterSpacing:1.1},compareButtons:{flexDirection:"row",gap:12,paddingBottom:8},compareButton:{flex:1,height:72,borderRadius:20,alignItems:"center",justifyContent:"center",backgroundColor:SPACE_CADET.surface1,borderWidth:1,borderColor:SPACE_CADET.borderSubtle},compareButtonText:{color:SPACE_CADET.white,fontFamily:"Gontserrat-SemiBold",fontSize:12,letterSpacing:1.6},compareRight:{borderColor:SUCCESS,backgroundColor:"#0C2B23"},compareWrong:{borderColor:ERROR,backgroundColor:"#3D101D"},statusTotal:{color:SPACE_CADET.textTertiary,fontSize:18},
   summaryScreen:{flex:1,alignItems:"center",paddingHorizontal:20,paddingTop:70,paddingBottom:28},summaryTitle:{color:SPACE_CADET.white,fontFamily:"Gontserrat-Light",fontSize:31,marginTop:8},scoreSummaryRow:{flexDirection:"row",alignItems:"center",gap:10,marginTop:31,marginBottom:26},scoreNumber:{color:ACCENT,fontFamily:"Garet-Book",fontSize:53},scoreUnit:{color:SPACE_CADET.textSecondary,fontFamily:"Gontserrat-SemiBold",fontSize:11,letterSpacing:1.7},resultCard:{width:"100%",backgroundColor:SPACE_CADET.surface1,borderRadius:22,padding:19},resultLine:{color:SPACE_CADET.textSecondary,fontFamily:"Gontserrat-Regular",fontSize:13,lineHeight:25},resultValue:{color:SPACE_CADET.white,fontFamily:"Garet-Book",fontSize:15},actions:{width:"100%",gap:12,marginTop:"auto"},primaryButton:{minHeight:54,borderRadius:999,alignItems:"center",justifyContent:"center",backgroundColor:SPACE_CADET.white},primaryText:{color:SPACE_CADET.black,fontFamily:"Gontserrat-Regular",fontSize:16,lineHeight:20,transform:[{translateY:2}]},secondaryButton:{minHeight:52,borderRadius:999,borderWidth:1,borderColor:SPACE_CADET.borderDefault,alignItems:"center",justifyContent:"center"},secondaryText:{color:SPACE_CADET.white,fontFamily:"Gontserrat-Regular",fontSize:15,lineHeight:19,transform:[{translateY:2}]},
 });

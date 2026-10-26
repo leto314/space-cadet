@@ -1,102 +1,77 @@
-import Slider from "@react-native-community/slider";
 import { useEffect, useRef, useState } from "react";
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import Animated, { FadeIn } from "react-native-reanimated";
 
-import { triggerSelectionHaptic } from "../../utils/haptics";
+import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
+import { createRandom, deriveSeed, randomTools } from "../../utils/random";
 import { ChoiceButton, ChoiceRow, GameSetupShell, PickerSetting, SettingCard } from "../../components/GameSetupShell";
 import { PulsingPrompt } from "../../components/PulsingPrompt";
+import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 
-const THEME_LIGHT = SPACE_CADET.black;
-const THEME_DARK = SPACE_CADET.white;
-const THEME_MUTED = SPACE_CADET.textSecondary;
-const THEME_ACCENT = SPACE_CADET.mentalMath;
+const ACCENT = SPACE_CADET.mentalMath;
 const SUCCESS = "#34D399";
 const ERROR = SPACE_CADET.attention;
+const OPERATION_LABELS = { "+": "+", "-": "−", x: "×", "/": "÷" };
+const MULTIPLIERS = [2, 2, 3, 4, 4, 5, 5, 6, 8, 9, 10, 10, 12, 15, 20, 25];
+const PACES = { 3: "SLOW", 2: "MEDIUM", 1: "FAST" };
+const PREPARE_MS = 900;
+const RESULT_MS = 1600;
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-const operationLevels = [
-  { value: 1, label: "+", operations: ["+"] },
-  { value: 2, label: "+ et -", operations: ["+", "-"] },
-  { value: 3, label: "+, - et x", operations: ["+", "-", "x"] },
-  { value: 4, label: "+, -, x et /", operations: ["+", "-", "x", "/"] },
+// Daily training: five series for everyone, longer and faster as they go. Each stage draws its length from its
+// own range (so a day's ladder always ramps up), its operations from the seed, and is worth a fixed share of the
+// 1000 points: 100 / 150 / 200 / 250 / 300, right or wrong.
+export const DAILY_STAGES = [
+  { pace: 3, operations: ["+", "-"], length: [5, 6], points: 100 },
+  { pace: 3, operations: ["+", "-", "x", "/"], length: [6, 7], points: 150 },
+  { pace: 2, operations: ["+", "-"], length: [7, 8], points: 200 },
+  { pace: 2, operations: ["+", "-", "x", "/"], length: [8, 9], points: 250 },
+  { pace: 1, operations: ["+", "-", "x", "/"], length: [9, 10], points: 300 },
 ];
+// With all four signs allowed, the chance of a × or ÷ step eases slightly as the series gets longer: 40 % at
+// five steps, 30 % at ten.
+const productChance = (length) => 0.4 - 0.02 * (length - 5);
 
-const easyMultipliers = [2, 2, 3, 4, 4, 5, 5, 6, 8, 9, 10, 10, 12, 15, 20, 25];
-
-function randomItem(items) {
-  return items[Math.floor(Math.random() * items.length)];
+function chooseOperation(operations, history, rnd, length) {
+  if (operations.length === 1) return operations[0];
+  const previous = history.at(-1);
+  const hasProducts = operations.includes("x") || operations.includes("/");
+  let pool = operations;
+  if (hasProducts && operations.length === 4) pool = rnd.chance(productChance(length)) ? ["x", "/"] : ["+", "-"];
+  const candidates = pool.filter((operation) => operation !== previous);
+  return rnd.item(candidates.length ? candidates : pool);
 }
 
-function randomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function chooseOperation(operations, history) {
-  if (operations.length === 1) {
-    return operations[0];
-  }
-
-  const previous = history[history.length - 1];
-  const candidates = operations.filter((operation) => operation !== previous);
-  const usable = candidates.length > 0 ? candidates : operations;
-  const counts = history.slice(-8).reduce((total, operation) => {
-    total[operation] = (total[operation] ?? 0) + 1;
-    return total;
-  }, {});
-  const lowestCount = Math.min(...usable.map((operation) => counts[operation] ?? 0));
-
-  return randomItem(usable.filter((operation) => (counts[operation] ?? 0) === lowestCount));
-}
-
-function buildSequence({ operations, operationCount }) {
-  let total = operations.includes("x") ? randomInt(6, 20) : randomInt(25, 99);
+// One series: a starting value and a chain of operations, drawn from `rnd`.
+export function buildSequence({ operations, operationCount }, rnd) {
+  const hasProducts = operations.includes("x") || operations.includes("/");
+  let total = hasProducts ? rnd.int(6, 20) : rnd.int(25, 99);
   const start = total;
   const steps = [];
   const history = [];
-
   for (let index = 0; index < operationCount; index += 1) {
-    const operation = chooseOperation(operations, history);
-    let shownOperation = operation;
+    const operation = chooseOperation(operations, history, rnd, operationCount);
+    let shown = operation;
     let operand;
-
-    if (operation === "+") {
-      operand = total < 100 ? randomInt(4, 59) : randomInt(10, 99);
-      total += operand;
-    }
-
-    if (operation === "-") {
-      operand = total > 20 ? randomInt(2, Math.max(2, Math.min(total - 1, 59))) : randomInt(1, Math.max(1, total - 1));
-      total -= operand;
-    }
-
-    if (operation === "x") {
-      operand = randomItem(easyMultipliers);
-
-      if (total * operand > 9999) {
-        operand = randomItem([2, 2, 3, 4, 5, 10]);
-      }
-
-      total *= operand;
-    }
-
+    if (operation === "+") { operand = total < 100 ? rnd.int(4, 59) : rnd.int(10, 99); total += operand; }
+    if (operation === "-") { operand = total > 20 ? rnd.int(2, Math.max(2, Math.min(total - 1, 59))) : rnd.int(1, Math.max(1, total - 1)); total -= operand; }
+    if (operation === "x") { operand = rnd.item(MULTIPLIERS); if (total * operand > 9999) operand = rnd.item([2, 2, 3, 4, 5, 10]); total *= operand; }
     if (operation === "/") {
-      const divisors = easyMultipliers.filter((divisor) => divisor > 1 && total % divisor === 0);
-
-      if (divisors.length === 0) {
-        shownOperation = "+";
-        operand = randomInt(4, 39);
-        total += operand;
-      } else {
-        operand = randomItem(divisors);
-        total /= operand;
-      }
+      const divisors = MULTIPLIERS.filter((divisor) => divisor > 1 && total % divisor === 0);
+      if (!divisors.length) { shown = "+"; operand = rnd.int(4, 39); total += operand; }
+      else { operand = rnd.item(divisors); total /= operand; }
     }
-
-    steps.push({ operation: shownOperation, operand });
-    history.push(shownOperation);
+    steps.push({ operation: shown, operand });
+    history.push(shown);
   }
-
   return { start, steps, answer: total };
+}
+
+// The day's five series.
+export function buildDailySeries(seed) {
+  const rnd = randomTools(createRandom(seed));
+  return DAILY_STAGES.map((stage, index) => ({ stage: index, pace: stage.pace, points: stage.points, operations: stage.operations, ...buildSequence({ operations: stage.operations, operationCount: rnd.int(stage.length[0], stage.length[1]) }, rnd) }));
 }
 
 function NumberPad({ onDigit, onDelete, onSubmit, disabled }) {
@@ -108,7 +83,7 @@ function NumberPad({ onDigit, onDelete, onSubmit, disabled }) {
         </TouchableOpacity>
       ))}
       <TouchableOpacity activeOpacity={0.85} disabled={disabled} onPress={onDelete} style={styles.key}>
-          <Text style={styles.keyAction}>DELETE</Text>
+        <Text style={styles.keyAction}>DELETE</Text>
       </TouchableOpacity>
       <TouchableOpacity activeOpacity={0.85} disabled={disabled} onPress={() => onDigit("0")} style={styles.key}>
         <Text style={styles.keyText}>0</Text>
@@ -120,261 +95,144 @@ function NumberPad({ onDigit, onDelete, onSubmit, disabled }) {
   );
 }
 
-export function ContinuousTotalGame({ onExit }) {
-  const [operationLevel, setOperationLevel] = useState(2);
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's five
+// series (DAILY_STAGES), each with its own ready screen, then onFinish({ score, metrics, trials }).
+export function ContinuousTotalGame({ onExit, daily = null }) {
   const [selectedOperations, setSelectedOperations] = useState(["+", "-"]);
   const [intervalSeconds, setIntervalSeconds] = useState(2);
   const [operationCount, setOperationCount] = useState(8);
-  const [phase, setPhase] = useState("setup");
-  const [sequence, setSequence] = useState(null);
+  const dailySeriesRef = useRef(daily ? buildDailySeries(deriveSeed(daily.seed, "series")) : null);
+  const [phase, setPhase] = useState(daily ? "ready" : "preflight");
+  const [sequence, setSequence] = useState(daily ? dailySeriesRef.current[0] : null);
+  const [seriesIndex, setSeriesIndex] = useState(0);
   const [stepIndex, setStepIndex] = useState(-1);
   const [answer, setAnswer] = useState("");
   const [feedback, setFeedback] = useState(null);
   const [resultCorrect, setResultCorrect] = useState(null);
-
+  const [results, setResults] = useState([]);
   const timeoutsRef = useRef([]);
+  const resultsRef = useRef([]);
+  const answerStartedAt = useRef(0);
+  const { isReturning, missionStyle, preflightStyle, startMission, returnToPreflight } = useMissionTransition({ onPrepareReturn: clearTimers, onReturnComplete: resetToPreflight });
 
   useEffect(() => () => clearTimers(), []);
-
-  function clearTimers() {
-    timeoutsRef.current.forEach(clearTimeout);
-    timeoutsRef.current = [];
-  }
-
-  function queue(callback, delay) {
-    const timeoutId = setTimeout(callback, delay);
-    timeoutsRef.current.push(timeoutId);
-  }
+  function clearTimers() { timeoutsRef.current.forEach(clearTimeout); timeoutsRef.current = []; }
+  function queue(callback, delay) { timeoutsRef.current.push(setTimeout(callback, delay)); }
+  const paceOf = (series) => series.pace ?? intervalSeconds;
 
   function showStep(nextIndex, activeSequence) {
     setStepIndex(nextIndex);
-
     queue(() => {
-      if (nextIndex + 1 < activeSequence.steps.length) {
-        showStep(nextIndex + 1, activeSequence);
-      } else {
-        setPhase("answer");
-      }
-    }, intervalSeconds * 1000);
+      if (nextIndex + 1 < activeSequence.steps.length) showStep(nextIndex + 1, activeSequence);
+      else { answerStartedAt.current = Date.now(); setPhase("answer"); }
+    }, paceOf(activeSequence) * 1000);
   }
-
-  function prepareRun() {
+  function resetToPreflight() { clearTimers(); setSequence(null); setFeedback(null); setResultCorrect(null); setPhase("preflight"); }
+  function resetToReady() {
     clearTimers();
-    setSequence(buildSequence({ operations: selectedOperations, operationCount }));
-    setAnswer("");
-    setFeedback(null);
-    setResultCorrect(null);
-    setPhase("ready");
+    setSequence(buildSequence({ operations: selectedOperations, operationCount }, randomTools(createRandom(Math.floor(Math.random() * 4294967296)))));
+    setAnswer(""); setFeedback(null); setResultCorrect(null); setPhase("ready");
   }
-
-  function startGame(useReadySequence = false) {
-    const nextSequence = useReadySequence && sequence ? sequence : buildSequence({ operations: selectedOperations, operationCount });
-
+  function prepareRun() { void triggerSelectionHaptic(); startMission(resetToReady); }
+  function startSeries() {
+    void triggerSelectionHaptic();
     clearTimers();
-    setSequence(nextSequence);
-    setStepIndex(-1);
-    setAnswer("");
-    setFeedback(null);
-    setResultCorrect(null);
-    setPhase("prepare");
-
-    queue(() => {
-      setPhase("sequence");
-      showStep(0, nextSequence);
-    }, 900);
+    setStepIndex(-1); setAnswer(""); setFeedback(null); setResultCorrect(null); setPhase("prepare");
+    queue(() => { setPhase("sequence"); showStep(0, sequence); }, PREPARE_MS);
   }
-
   function toggleOperation(operation) {
     setSelectedOperations((current) => {
       if (current.includes(operation)) return current.length === 1 ? current : current.filter((item) => item !== operation);
       return [...current, operation];
     });
   }
-
-  function handleDigit(value) {
-    void triggerSelectionHaptic();
-    setAnswer((current) => `${current}${value}`.slice(0, 7));
-  }
-
-  function handleDelete() {
-    void triggerSelectionHaptic();
-    setAnswer((current) => current.slice(0, -1));
-  }
-
+  function handleDigit(value) { void triggerSelectionHaptic(); setAnswer((current) => `${current}${value}`.slice(0, 7)); }
+  function handleDelete() { void triggerSelectionHaptic(); setAnswer((current) => current.slice(0, -1)); }
   async function submitAnswer() {
-    if (!sequence || answer.length === 0 || feedback) {
-      return;
-    }
-
+    if (!sequence || answer.length === 0 || feedback) return;
     const correct = Number(answer) === sequence.answer;
-
     await triggerSelectionHaptic();
+    void (correct ? triggerSuccessHaptic() : triggerErrorHaptic());
+    resultsRef.current = [...resultsRef.current, { ok: correct ? 1 : 0, ms: Date.now() - answerStartedAt.current, answer: Number(answer), expected: sequence.answer, length: sequence.steps.length, pace: paceOf(sequence), pts: correct ? sequence.points ?? 0 : 0 }];
+    setResults(resultsRef.current);
     setResultCorrect(correct);
     setFeedback(correct ? "success" : "error");
-    queue(() => {
-      setFeedback(null);
-      setPhase("result");
-    }, 260);
+    queue(() => { setFeedback(null); setPhase("result"); if (daily) queue(advanceDaily, RESULT_MS); }, 260);
+  }
+  function advanceDaily() {
+    const next = seriesIndex + 1;
+    if (next < dailySeriesRef.current.length) { setSeriesIndex(next); setSequence(dailySeriesRef.current[next]); setAnswer(""); setResultCorrect(null); setPhase("ready"); return; }
+    const entries = resultsRef.current;
+    daily.onFinish({
+      score: clamp(entries.reduce((sum, entry) => sum + entry.pts, 0), 0, 1000),
+      metrics: { correct: entries.filter((entry) => entry.ok).length, series: entries.length, steps: entries.reduce((sum, entry) => sum + entry.length, 0), offByTen: entries.filter((entry) => !entry.ok && Math.abs(entry.answer - entry.expected) <= 10).length, meanAnswerMs: Math.round(entries.reduce((sum, entry) => sum + entry.ms, 0) / entries.length) },
+      trials: entries,
+    });
   }
 
-  function resetToSetup() {
-    clearTimers();
-    setPhase("setup");
-    setFeedback(null);
-  }
+  const visibleValue = sequence ? (stepIndex === -1 ? String(sequence.start) : `${OPERATION_LABELS[sequence.steps[stepIndex].operation]} ${sequence.steps[stepIndex].operand}`) : "";
+  const stageLabel = sequence?.pace ? `${PACES[sequence.pace]} · ${sequence.operations.length === 2 ? "+ AND −" : "ALL SIGNS"} · ${sequence.steps.length} STEPS` : null;
 
-  const operationLabel = operationLevels.find((item) => item.value === operationLevel).label;
-  const visibleValue = sequence
-    ? stepIndex === -1
-      ? String(sequence.start)
-      : `${sequence.steps[stepIndex].operation} ${sequence.steps[stepIndex].operand}`
-    : "";
+  const preflight = <GameSetupShell title="Running Total" categoryKey="mentalMath" onExit={onExit} onStart={prepareRun} rules="Tests mental updating and sustained focus. Keep a running total as each operation appears, then enter the final total. Choose any operation mix; shorter intervals make the sequence harder.Easy: Use a slower pace and fewer operations.Medium: Mix operations at a medium pace.Hard: Use all four operations at a fast pace.">
+    <PickerSetting label="Pace" hint="Time between operations" options={[{ value: 3, label: "SLOW" }, { value: 2, label: "MEDIUM" }, { value: 1, label: "FAST" }]} value={intervalSeconds} onChange={setIntervalSeconds} />
+    <SettingCard label="Operations"><ChoiceRow>{["+", "-", "x", "/"].map((operation) => <ChoiceButton key={operation} label={OPERATION_LABELS[operation]} selected={selectedOperations.includes(operation)} onPress={() => toggleOperation(operation)} accent={ACCENT} />)}</ChoiceRow></SettingCard>
+    <PickerSetting label="Series length" options={[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((value) => ({ value, label: String(value) }))} value={operationCount} onChange={setOperationCount} />
+  </GameSetupShell>;
 
-  if (phase === "setup") {
-    return (
-      <GameSetupShell title="Running Total" categoryKey="mentalMath" onExit={onExit} onStart={prepareRun} rules="Tests mental updating and sustained focus. Keep a running total as each operation appears. Choose any operation mix; shorter intervals make the sequence harder.Easy: Use a slower pace and a short series.Medium: Increase the pace or series length.Hard: Use both a fast pace and a long series.">
-        <PickerSetting label="Pace" hint="Time between operations" options={[{ value: 3, label: "SLOW" }, { value: 2, label: "MEDIUM" }, { value: 1, label: "FAST" }]} value={intervalSeconds} onChange={setIntervalSeconds} />
-        <SettingCard label="Operations"><ChoiceRow>{["+", "−", "×", "÷"].map((label, index) => { const operation = ["+", "-", "x", "/"][index]; return <ChoiceButton key={operation} label={label} selected={selectedOperations.includes(operation)} onPress={() => toggleOperation(operation)} accent={SPACE_CADET.mentalMath} />; })}</ChoiceRow></SettingCard>
-        <PickerSetting label="Series length" options={[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((value) => ({ value, label: String(value) }))} value={operationCount} onChange={setOperationCount} />
-      </GameSetupShell>
-    );
-  }
+  return <View style={styles.container}>
+    {phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}
+    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, !daily && missionStyle]}>
+      <View style={styles.header}><Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
 
-  return (
-    <View style={styles.container}>
-      <View style={styles.headerRow}>
-        <TouchableOpacity activeOpacity={0.85} onPress={resetToSetup} style={styles.backButton}>
-          <Text style={styles.backButtonText}>←</Text>
-        </TouchableOpacity>
-      </View>
+      {phase === "ready" && sequence ? <Pressable onPress={startSeries} style={styles.readyScreen}>
+        <Text style={styles.kicker}>{daily ? `DAILY TRAINING · SERIES ${seriesIndex + 1} / ${DAILY_STAGES.length}` : "RUNNING TOTAL"}</Text>
+        <Text style={styles.readyTitle}>{daily && seriesIndex === 0 ? "Ready to keep count?" : "Starting value"}</Text>
+        {daily && seriesIndex === 0 ? <Text style={styles.readyText}>Five series, longer and faster as they go. Keep the total in your head, then enter it. Worth 100 to 300 points each.</Text> : null}
+        {daily ? <Text style={styles.stageText}>{stageLabel} · {sequence.points} POINTS</Text> : null}
+        <Text style={styles.readyValue}>{sequence.start}</Text>
+        <PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt>
+      </Pressable> : null}
 
-      {phase === "setup" ? (
-        <View style={styles.setupPanel}>
-          <Text style={styles.sectionTitle}>Suis le total</Text>
-          <Text style={styles.sectionSubtitle}>Retiens le nombre de depart, puis applique chaque operation mentalement.</Text>
+      {phase === "prepare" ? <View style={styles.centerPanel}><Text style={styles.prepareText}>Focus</Text><Text style={styles.prepareHint}>The starting value is coming up.</Text></View> : null}
 
-          <View style={styles.settingCard}>
-            <Text style={styles.settingLabel}>Operations</Text>
-            <Text style={styles.settingValue}>{operationLabel}</Text>
-            <Slider minimumValue={1} maximumValue={4} step={1} value={operationLevel} minimumTrackTintColor={THEME_DARK} maximumTrackTintColor="#D7CEC0" thumbTintColor={THEME_ACCENT} onValueChange={setOperationLevel} />
-            <View style={styles.sliderExtremes}><Text style={styles.sliderText}>+</Text><Text style={styles.sliderText}>+ - x /</Text></View>
-          </View>
+      {phase === "sequence" && sequence ? <View style={styles.centerPanel}>
+        <Text style={styles.progressText}>{stepIndex === -1 ? "STARTING VALUE" : `OPERATION ${stepIndex + 1} / ${sequence.steps.length}`}</Text>
+        <Text adjustsFontSizeToFit numberOfLines={1} style={styles.sequenceValue}>{visibleValue}</Text>
+      </View> : null}
 
-          <View style={styles.settingCard}>
-            <Text style={styles.settingLabel}>Temps entre deux operations</Text>
-            <Text style={styles.settingValue}>{intervalSeconds} s</Text>
-            <Slider minimumValue={1} maximumValue={5} step={1} value={intervalSeconds} minimumTrackTintColor={THEME_DARK} maximumTrackTintColor="#D7CEC0" thumbTintColor={THEME_ACCENT} onValueChange={setIntervalSeconds} />
-            <View style={styles.sliderExtremes}><Text style={styles.sliderText}>1 s</Text><Text style={styles.sliderText}>5 s</Text></View>
-          </View>
-
-          <View style={styles.settingCard}>
-            <Text style={styles.settingLabel}>Nombre total d'operations</Text>
-            <Text style={styles.settingValue}>{operationCount}</Text>
-            <Slider minimumValue={5} maximumValue={15} step={1} value={operationCount} minimumTrackTintColor={THEME_DARK} maximumTrackTintColor="#D7CEC0" thumbTintColor={THEME_ACCENT} onValueChange={setOperationCount} />
-            <View style={styles.sliderExtremes}><Text style={styles.sliderText}>5</Text><Text style={styles.sliderText}>15</Text></View>
-          </View>
-
-          <TouchableOpacity activeOpacity={0.9} onPress={startGame} style={styles.primaryButton}>
-            <Text style={styles.primaryButtonText}>Valider et commencer</Text>
-          </TouchableOpacity>
+      {phase === "answer" ? <Animated.View entering={FadeIn.duration(160)} style={styles.answerPanel}>
+        <View style={styles.answerPrompt}>
+          <Text style={styles.kicker}>{daily ? `SERIES ${seriesIndex + 1} / ${DAILY_STAGES.length}` : "RUNNING TOTAL"}</Text>
+          <Text style={styles.answerTitle}>What is the final total?</Text>
+          <View style={[styles.answerBox, feedback === "success" && styles.answerSuccess, feedback === "error" && styles.answerError]}><Text style={[styles.answerText, feedback === "success" && styles.answerTextSuccess, feedback === "error" && styles.answerTextError]}>{answer || " "}</Text></View>
         </View>
-      ) : null}
+        <NumberPad disabled={Boolean(feedback)} onDigit={handleDigit} onDelete={handleDelete} onSubmit={submitAnswer} />
+      </Animated.View> : null}
 
-      {phase === "ready" && sequence ? (
-        <TouchableOpacity activeOpacity={0.95} onPress={() => startGame(true)} style={styles.readyPanel}>
-          <Text style={styles.progressText}>RUNNING TOTAL</Text>
-          <Text style={styles.prepareText}>Starting value</Text>
-          <Text style={styles.sequenceValue}>{sequence.start}</Text>
-          <PulsingPrompt color={THEME_ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt>
-        </TouchableOpacity>
-      ) : null}
-
-      {phase === "prepare" ? (
-        <View style={styles.centerPanel}>
-          <Text style={styles.prepareText}>Focus</Text>
-          <Text style={styles.prepareHint}>The starting value is coming up.</Text>
-        </View>
-      ) : null}
-
-      {phase === "sequence" && sequence ? (
-        <View style={styles.sequencePanel}>
-          <Text style={styles.progressText}>{stepIndex === -1 ? "STARTING VALUE" : `OPERATION ${stepIndex + 1} / ${sequence.steps.length}`}</Text>
-          <Text adjustsFontSizeToFit numberOfLines={1} style={styles.sequenceValue}>{visibleValue}</Text>
-        </View>
-      ) : null}
-
-      {phase === "answer" ? (
-        <View style={styles.answerPanel}>
-          <View style={styles.answerPrompt}>
-            <Text style={styles.answerKicker}>RUNNING TOTAL</Text>
-            <Text style={styles.sectionTitle}>What is the final total?</Text>
-            <View style={[styles.answerBox, feedback === "success" && styles.answerSuccess, feedback === "error" && styles.answerError]}><Text style={[styles.answerText, feedback === "success" && styles.answerTextSuccess, feedback === "error" && styles.answerTextError]}>{answer || " "}</Text></View>
-          </View>
-          <NumberPad disabled={Boolean(feedback)} onDigit={handleDigit} onDelete={handleDelete} onSubmit={submitAnswer} />
-        </View>
-      ) : null}
-
-      {phase === "result" && sequence ? (
-        <View style={styles.resultPanel}>
-          <Text style={[styles.resultTitle, resultCorrect ? styles.resultCorrect : styles.resultWrong]}>{resultCorrect ? "Correct" : "Not quite"}</Text>
-          <Text style={styles.resultLine}>Your answer  <Text style={styles.resultValue}>{answer}</Text></Text>
-          <Text style={styles.resultLine}>Final total  <Text style={styles.resultValue}>{sequence.answer}</Text></Text>
-          <TouchableOpacity activeOpacity={0.9} onPress={startGame} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Play again</Text></TouchableOpacity>
-          <TouchableOpacity activeOpacity={0.9} onPress={resetToSetup} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Change settings</Text></TouchableOpacity>
-        </View>
-      ) : null}
-    </View>
-  );
+      {phase === "result" && sequence ? <Animated.View entering={FadeIn.duration(160)} style={styles.resultPanel}>
+        <Text style={[styles.resultTitle, resultCorrect ? styles.resultCorrect : styles.resultWrong]}>{resultCorrect ? "Correct" : "Not quite"}</Text>
+        <Text style={styles.resultLine}>Your answer  <Text style={styles.resultValue}>{answer}</Text></Text>
+        <Text style={styles.resultLine}>Final total  <Text style={styles.resultValue}>{sequence.answer}</Text></Text>
+        {daily ? <Text style={styles.resultLine}>Points  <Text style={styles.resultValue}>{resultCorrect ? sequence.points : 0} / {sequence.points}</Text></Text> : null}
+        {daily ? <Text style={styles.totalLine}>{results.reduce((sum, entry) => sum + entry.pts, 0)} / 1000 so far</Text> : <View style={styles.actions}>
+          <TouchableOpacity activeOpacity={0.9} onPress={resetToReady} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Play again</Text></TouchableOpacity>
+          <TouchableOpacity activeOpacity={0.9} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Change settings</Text></TouchableOpacity>
+        </View>}
+      </Animated.View> : null}
+    </Animated.View> : null}
+  </View>;
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingTop: 12, backgroundColor: SPACE_CADET.black },
-  headerRow: { flexDirection: "row", alignItems: "center", marginBottom: 14 },
-  backButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
-  backButtonText: { color: THEME_DARK, fontFamily: "Gontserrat-Light", fontSize: 32, lineHeight: 36 },
-  setupPanel: { flex: 1, justifyContent: "center" },
-  centerPanel: { flex: 1, justifyContent: "center", alignItems: "center", paddingBottom: 150 },
-  readyPanel: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 24, paddingBottom: 150 },
-  sectionTitle: { color: THEME_DARK, fontFamily: "Gontserrat-Light", fontSize: 29, textAlign: "center", marginBottom: 10 },
-  sectionSubtitle: { color: "#5B6573", fontSize: 16, lineHeight: 23, textAlign: "center", marginBottom: 22 },
-  settingCard: { backgroundColor: "#FFFFFF", borderRadius: 22, paddingHorizontal: 18, paddingVertical: 15, marginBottom: 14 },
-  settingLabel: { color: THEME_DARK, fontSize: 15, fontWeight: "700", marginBottom: 4 },
-  settingValue: { color: THEME_ACCENT, fontSize: 25, fontWeight: "700", marginBottom: 5 },
-  sliderExtremes: { flexDirection: "row", justifyContent: "space-between", marginTop: -4 },
-  sliderText: { color: THEME_MUTED, fontSize: 12 },
-  primaryButton: { width: "100%", marginTop: "auto", minHeight: 54, borderRadius: 999, alignItems: "center", justifyContent: "center", backgroundColor: THEME_DARK },
-  primaryButtonText: { color: THEME_LIGHT, fontFamily: "Gontserrat-Regular", fontSize: 16 },
-  secondaryButton: { width: "100%", marginTop: 12, minHeight: 52, borderRadius: 999, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: SPACE_CADET.borderDefault },
-  secondaryButtonText: { color: THEME_DARK, fontFamily: "Gontserrat-Regular", fontSize: 15 },
-  prepareText: { color: THEME_DARK, fontFamily: "Gontserrat-Light", fontSize: 38, textAlign: "center" },
-  prepareHint: { color: THEME_MUTED, fontFamily: "Gontserrat-Regular", fontSize: 16, textAlign: "center", marginTop: 12 },
-  sequencePanel: { flex: 1, justifyContent: "center", alignItems: "center", paddingBottom: 150 },
-  progressText: { color: THEME_ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, textTransform: "uppercase", letterSpacing: 1.7, marginBottom: 20, textAlign: "center" },
-  sequenceValue: { color: THEME_DARK, fontFamily: "Garet-Book", fontSize: 62, textAlign: "center", width: "100%" },
-  sequenceHint: { color: THEME_MUTED, fontSize: 16, marginTop: 24 },
-  answerPanel: { flex: 1, position: "relative", overflow: "hidden" },
-  answerPrompt: { flex: 1, justifyContent: "center", alignItems: "center" },
-  answerBox: { minWidth: 170, borderBottomWidth: 1.25, borderBottomColor: THEME_DARK, marginTop: 20, paddingHorizontal: 12, paddingBottom: 7 },
-  answerSuccess: { borderBottomColor: SUCCESS },
-  answerError: { borderBottomColor: ERROR },
-  answerText: { color: THEME_DARK, fontFamily: "Garet-Book", fontSize: 34, textAlign: "center", minHeight: 42 },
-  answerTextSuccess: { color: SUCCESS },
-  answerTextError: { color: ERROR },
-  keypad: { flexDirection: "row", flexWrap: "wrap", gap: 9, paddingBottom: 30 },
-  key: { width: "31.3%", height: 58, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: SPACE_CADET.surface1 },
-  keyText: { color: THEME_DARK, fontFamily: "Garet-Book", fontSize: 24 },
-  keyAction: { color: THEME_DARK, fontSize: 13, fontWeight: "700" },
-  submitKey: { backgroundColor: THEME_DARK },
-  submitKeyText: { color: THEME_LIGHT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1 },
-  feedbackOverlay: { ...StyleSheet.absoluteFill, opacity: 0 },
-  feedbackSuccess: { backgroundColor: SUCCESS, opacity: 0.25 },
-  feedbackError: { backgroundColor: ERROR, opacity: 0.2 },
-  beginPrompt: { marginTop: 44, textAlign: "center" },
-  resultTitle: { fontFamily: "Gontserrat-Light", fontSize: 38, textAlign: "center", marginBottom: 20 },
-  resultCorrect: { color: SUCCESS },
-  resultWrong: { color: ERROR },
-  resultLine: { color: THEME_MUTED, fontFamily: "Gontserrat-Regular", fontSize: 15, lineHeight: 28, textAlign: "center" },
-  resultValue: { color: THEME_DARK, fontFamily: "Garet-Book", fontSize: 17 },
-  answerKicker: { color: THEME_ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.7, marginBottom: 13 },
-  resultPanel: { flex: 1, alignItems: "center", paddingHorizontal: 20, paddingTop: 96, paddingBottom: 28 },
+  container: { flex: 1, backgroundColor: SPACE_CADET.black }, preflightLayer: { ...StyleSheet.absoluteFill, zIndex: 1 }, missionLayer: { flex: 1, backgroundColor: SPACE_CADET.black, zIndex: 2 },
+  header: { height: 64, paddingHorizontal: 20, justifyContent: "center" }, backButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" }, backArrow: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 32, lineHeight: 36 }, pressed: { transform: [{ scale: 0.97 }] },
+  kicker: { color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.9, textAlign: "center" },
+  readyScreen: { flex: 1, alignItems: "center", paddingHorizontal: 28, paddingTop: 64 }, readyTitle: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 31, marginTop: 9, textAlign: "center" }, readyText: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 14, lineHeight: 21, maxWidth: 296, textAlign: "center", marginTop: 12 }, stageText: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.6, marginTop: 26 }, readyValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 62, marginTop: 22 }, beginPrompt: { marginTop: 40, textAlign: "center" },
+  centerPanel: { flex: 1, justifyContent: "center", alignItems: "center", paddingBottom: 150 }, prepareText: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 38, textAlign: "center" }, prepareHint: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 16, textAlign: "center", marginTop: 12 },
+  progressText: { color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.7, marginBottom: 20, textAlign: "center" }, sequenceValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 62, textAlign: "center", width: "100%" },
+  answerPanel: { flex: 1, paddingHorizontal: 20 }, answerPrompt: { flex: 1, justifyContent: "center", alignItems: "center" }, answerTitle: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 29, textAlign: "center", marginTop: 13 },
+  answerBox: { minWidth: 170, borderBottomWidth: 1.25, borderBottomColor: SPACE_CADET.white, marginTop: 20, paddingHorizontal: 12, paddingBottom: 7 }, answerSuccess: { borderBottomColor: SUCCESS }, answerError: { borderBottomColor: ERROR }, answerText: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 34, textAlign: "center", minHeight: 42 }, answerTextSuccess: { color: SUCCESS }, answerTextError: { color: ERROR },
+  keypad: { flexDirection: "row", flexWrap: "wrap", gap: 9, paddingBottom: 30 }, key: { width: "31.3%", height: 58, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: SPACE_CADET.surface1 }, keyText: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 24 }, keyAction: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 0.8 }, submitKey: { backgroundColor: SPACE_CADET.white }, submitKeyText: { color: SPACE_CADET.black, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1 },
+  resultPanel: { flex: 1, alignItems: "center", paddingHorizontal: 20, paddingTop: 96, paddingBottom: 28 }, resultTitle: { fontFamily: "Gontserrat-Light", fontSize: 38, textAlign: "center", marginBottom: 20 }, resultCorrect: { color: SUCCESS }, resultWrong: { color: ERROR }, resultLine: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 15, lineHeight: 28, textAlign: "center" }, resultValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 17 }, totalLine: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-Regular", fontSize: 13, marginTop: 22 },
+  actions: { width: "100%", gap: 12, marginTop: "auto" }, primaryButton: { width: "100%", minHeight: 54, borderRadius: 999, alignItems: "center", justifyContent: "center", backgroundColor: SPACE_CADET.white }, primaryButtonText: { color: SPACE_CADET.black, fontFamily: "Gontserrat-Regular", fontSize: 16 }, secondaryButton: { width: "100%", minHeight: 52, borderRadius: 999, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: SPACE_CADET.borderDefault }, secondaryButtonText: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Regular", fontSize: 15 },
 });

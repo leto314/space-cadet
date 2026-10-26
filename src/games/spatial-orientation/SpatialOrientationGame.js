@@ -1,6 +1,5 @@
 import { Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useEffect, useRef, useState } from "react";
-import Slider from "@react-native-community/slider";
 import Svg, { Polygon } from "react-native-svg";
 import Animated, { Easing, runOnJS, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 
@@ -720,59 +719,6 @@ export function SpatialOrientationGame({ onExit }) {
       >
       <View style={styles.headerRow}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
 
-      {phase === "difficulty" ? (
-        <View style={styles.centerPanel}>
-          <Text style={styles.sectionTitle}>Choix de la difficulte</Text>
-          <Text style={styles.sectionSubtitle}>
-            Les niveaux changent surtout le rythme et le nombre de rotations.
-          </Text>
-
-          <View style={styles.sliderBlock}>
-            <Text style={styles.sliderLabel}>Nombre de mouvements</Text>
-            <Text style={styles.sliderValue}>{moveCount}</Text>
-            <Slider
-              minimumValue={4}
-              maximumValue={15}
-              step={1}
-              value={moveCount}
-              minimumTrackTintColor="#1F2A37"
-              maximumTrackTintColor="#D7CEC0"
-              thumbTintColor="#8D6E4F"
-              onValueChange={setMoveCount}
-            />
-            <View style={styles.sliderExtremes}>
-              <Text style={styles.sliderExtremeText}>4</Text>
-              <Text style={styles.sliderExtremeText}>15</Text>
-            </View>
-          </View>
-
-          <View style={styles.difficultyRow}>
-            {difficultyOptions.map((option) => {
-              const isSelected = selectedDifficulty?.key === option.key;
-
-              return (
-                <TouchableOpacity
-                  key={option.key}
-                  activeOpacity={0.9}
-                  onPress={() => resetRun(option)}
-                  style={[styles.difficultyChip, isSelected && styles.difficultyChipSelected]}
-                >
-                  <Text
-                    style={[
-                      styles.difficultyChipText,
-                      isSelected && styles.difficultyChipTextSelected,
-                    ]}
-                  >
-                    {option.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-        </View>
-      ) : null}
-
       {phase !== "difficulty" ? (
         <View style={styles.gamePanel}>
           <Pressable disabled={phase !== "preview"} onPress={startSequence} style={styles.gameBody}>
@@ -909,79 +855,6 @@ const styles = StyleSheet.create({
   },
   pressed: {
     transform: [{ scale: 0.97 }],
-  },
-  centerPanel: {
-    flex: 1,
-    justifyContent: "center",
-  },
-  sectionTitle: {
-    fontSize: 32,
-    fontWeight: "700",
-    color: "#1F2A37",
-    marginBottom: 12,
-    textAlign: "center",
-  },
-  sectionSubtitle: {
-    fontSize: 16,
-    lineHeight: 24,
-    color: "#5B6573",
-    marginBottom: 22,
-    textAlign: "center",
-  },
-  sliderBlock: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 22,
-    paddingHorizontal: 18,
-    paddingVertical: 16,
-    marginBottom: 18,
-  },
-  sliderLabel: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#1F2A37",
-    marginBottom: 4,
-  },
-  sliderValue: {
-    fontSize: 28,
-    fontWeight: "700",
-    color: "#8D6E4F",
-    marginBottom: 6,
-  },
-  sliderExtremes: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: -4,
-  },
-  sliderExtremeText: {
-    fontSize: 12,
-    color: "#8E897F",
-  },
-  difficultyRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  difficultyChip: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 16,
-    borderRadius: 20,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 2,
-    borderColor: "transparent",
-  },
-  difficultyChipSelected: {
-    backgroundColor: "#1F2A37",
-    borderColor: "#1F2A37",
-  },
-  difficultyChipText: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#1F2A37",
-  },
-  difficultyChipTextSelected: {
-    color: "#F4EFE6",
   },
   gamePanel: {
     flex: 1,
