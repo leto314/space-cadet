@@ -1,14 +1,18 @@
-// Pure logic for the Cube Nets game: folding nets, comparing cubes, building puzzles. No React in here.
+// Cube Nets: the logic. Pure JavaScript (no React, no React Native): folding nets, comparing cubes, building
+// puzzles, the daily progression and the daily score. Every generator takes `random` (a Math.random-like function,
+// see utils/random.js) so the same seed always gives the same puzzles.
 //
 // Conventions: 3D vectors are [x, y, z]. A net is drawn flat and seen from OUTSIDE the cube, so folding pushes the
 // neighbouring faces away from the viewer. Every net cell carries a frame { n, r, u }: the outward normal of its
 // face and where the cell's "right" and "up" point once folded (r × u = n). A glyph drawn in a cell is turned
 // clockwise by k quarter turns; on the cube it is stored as the 3D direction its top points to.
 
+import { createRandom, deriveSeed, hashString } from "../../utils/random.js";
+
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-const neg = (a) => [-a[0], -a[1], -a[2]];
+export const neg = (a) => [-a[0], -a[1], -a[2]];
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+export const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const same = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 const key = (v) => v.join(",");
 const AXES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
@@ -147,7 +151,7 @@ export function oppositeAppearance(net, asked) {
   // Seen from behind, what was on the right is now on the left.
   return { cell, turn: [up, neg(right), neg(up), right].findIndex((direction) => same(direction, top)) };
 }
-export function randomShape(random = Math.random) {
+export function randomShape(random) {
   const rnd = tools(random);
   return transformShape(rnd.item(SHAPES), rnd.int(0, 3), rnd.chance(0.5));
 }
@@ -200,8 +204,7 @@ function randomNet(cube, shapeIndex, rnd) {
 
 // mode "fold": which cube does this net make?   mode "refold": which other net makes the same cube?
 // mode "unfold": the cube is shown from three corners; which net makes it?
-// `random` is injectable for seeded daily challenges.
-export function buildPuzzle(mode, level, random = Math.random) {
+export function buildPuzzle(mode, level, random) {
   const rnd = tools(random);
   const glyphs = rnd.shuffle(GLYPH_NAMES).slice(0, 6);
   const seedShape = transformShape(SHAPES[0], 0, false);
@@ -250,3 +253,45 @@ export function levelForIndex(difficulty, index, total) {
 
 // Test hooks.
 export const internals = { cubeFromNet, netFromCube, cubeSignature, viewFromCube, BASES, transformShape };
+
+export const MODE_CYCLE = ["fold", "refold", "unfold"];
+
+// A Full Clearance session from a seed: `puzzleCount` puzzles in the chosen mode ("mixed" alternates between the
+// three) at the chosen difficulty ("progressive" goes easy to hard). Each puzzle has its own stream derived from
+// the seed; a draw that fails to produce four distinct options (rare) moves on to the next stream.
+function puzzleFromSeed(mode, level, seed, index) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const puzzle = buildPuzzle(mode, level, createRandom(deriveSeed(seed, `puzzle-${index}:${attempt}`)));
+    if (puzzle) return puzzle;
+  }
+  return null;
+}
+export function buildSession({ mode, puzzleCount, difficulty }, seed) {
+  return Array.from({ length: puzzleCount }, (_, index) => puzzleFromSeed(mode === "mixed" ? MODE_CYCLE[index % MODE_CYCLE.length] : mode, levelForIndex(difficulty, index, puzzleCount), seed, index)).filter(Boolean);
+}
+
+// The ready screen's illustration: a net and the cube it folds into, the same every time.
+export function samplePuzzle() { return buildPuzzle("fold", "easy", createRandom(hashString("cube-nets:sample"))); }
+
+// Daily training: the same eight puzzles for everyone, every exercise tested, easy to hard.
+export const DAILY_PUZZLES = [
+  { mode: "fold", level: "easy" }, { mode: "refold", level: "easy" }, { mode: "unfold", level: "easy" },
+  { mode: "fold", level: "medium" }, { mode: "refold", level: "medium" }, { mode: "unfold", level: "medium" },
+  { mode: "fold", level: "hard" }, { mode: "unfold", level: "hard" },
+];
+export const DAILY_SETTINGS = { mode: "mixed", puzzleCount: DAILY_PUZZLES.length, difficulty: "progressive" };
+export function buildDailyPuzzles(seed) {
+  return DAILY_PUZZLES.map(({ mode, level }, index) => puzzleFromSeed(mode, level, seed, index)).filter(Boolean);
+}
+
+// The daily result from the answers ([{ correct, timeMs, level, mode }]): a score out of 1000 (125 per right
+// answer), the metrics recorded, and the compact trial list.
+export function dailyResult(entries) {
+  const correctIn = (key) => entries.filter((entry) => entry.mode === key && entry.correct).length;
+  const correct = entries.filter((entry) => entry.correct).length;
+  return {
+    score: Math.round((correct / entries.length) * 1000),
+    metrics: { correct, puzzles: entries.length, netToCube: correctIn("fold"), netToNet: correctIn("refold"), cubeToNet: correctIn("unfold"), meanAnswerMs: Math.round(entries.reduce((sum, entry) => sum + entry.timeMs, 0) / entries.length) },
+    trials: entries.map((entry) => ({ ok: entry.correct ? 1 : 0, ms: entry.timeMs, mode: entry.mode, level: entry.level })),
+  };
+}

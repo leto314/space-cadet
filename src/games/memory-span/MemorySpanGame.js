@@ -9,47 +9,14 @@ import { SPACE_CADET } from "../../theme/spaceCadet";
 import { ensureAudioReady } from "../../utils/audio";
 import { endVoiceSession, speak, startVoiceSession, stopSpeaking } from "../../utils/voice";
 import { triggerSelectionHaptic } from "../../utils/haptics";
+import { randomSeed } from "../../utils/random";
+import { buildDailyLadder, buildRound, computeResult, DAILY_LADDER, DIFFICULTY_OPTIONS, dailyResult, directionLabel, sequencePoints } from "./logic";
 
 const MEMORY_ACCENT = SPACE_CADET.memory;
 const SUCCESS_COLOR = "#34D399";
 const ERROR_COLOR = SPACE_CADET.attention;
-const NATO_WORDS = { A: "alpha", B: "bravo", C: "charlie", D: "delta", E: "echo", F: "foxtrot", G: "golf", H: "hotel", I: "india", J: "juliett", K: "kilo", L: "lima", M: "mike", N: "november", O: "oscar", P: "papa", Q: "quebec", R: "romeo", S: "sierra", T: "tango", U: "uniform", V: "victor", W: "whiskey", X: "x-ray", Y: "yankee", Z: "zulu" };
-const DIGIT_WORDS = { 0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine" };
 const numericKeyboardRows = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"]];
 const alphaKeyboardRows = [["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"], ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"], ["A", "S", "D", "F", "G", "H", "J", "K", "L"], ["Z", "X", "C", "V", "B", "N", "M"]];
-
-const difficultyOptions = [
-  { key: "easy", label: "EASY", revealDirectionEarly: true, showCharacters: true, allowLetters: false, recommendedLength: 5 },
-  { key: "medium", label: "MEDIUM", revealDirectionEarly: false, showCharacters: true, allowLetters: false, recommendedLength: 6 },
-  { key: "hard", label: "HARD", revealDirectionEarly: false, showCharacters: false, allowLetters: true, recommendedLength: 7 },
-];
-
-function randomItem(items) { return items[Math.floor(Math.random() * items.length)]; }
-function buildDirection() { return Math.random() > 0.5 ? "forward" : "reverse"; }
-function directionLabel(direction) { return direction === "reverse" ? "REVERSE" : "FORWARD"; }
-
-function buildSequence(length, allowLetters) {
-  const digits = Object.keys(DIGIT_WORDS);
-  const letters = Object.keys(NATO_WORDS);
-  return Array.from({ length }, () => {
-    const useLetter = allowLetters && Math.random() < 0.32;
-    const symbol = useLetter ? randomItem(letters) : randomItem(digits);
-    return { symbol, spoken: useLetter ? NATO_WORDS[symbol] : DIGIT_WORDS[symbol] };
-  });
-}
-
-function targetSequence(sequence, direction) {
-  return direction === "reverse" ? [...sequence].reverse() : [...sequence];
-}
-
-function computeResult(sequence, entered, direction) {
-  const target = targetSequence(sequence, direction).map((item) => item.symbol);
-  const attempt = entered.split("");
-  const correctPositions = target.filter((symbol, index) => attempt[index] === symbol).length;
-  const wrongDirection = !target.every((symbol, index) => attempt[index] === symbol)
-    && [...target].reverse().join("") === entered;
-  return { exact: target.join("") === entered, wrongDirection, correctPositions, total: target.length, targetSymbols: target, enteredSymbols: attempt, targetDisplay: target.join(" "), enteredDisplay: attempt.join(" "), accuracy: Math.round((correctPositions / target.length) * 100) };
-}
 
 function KeyButton({ label, onPress, wide = false, disabled = false }) {
   return <Pressable disabled={disabled} onPress={() => { void triggerSelectionHaptic(); onPress?.(); }} style={({ pressed }) => [styles.key, wide && styles.keyWide, disabled && styles.keyDisabled, pressed && styles.pressed]}><Text style={[styles.keyText, wide && styles.keyTextWide]}>{label}</Text></Pressable>;
@@ -63,21 +30,33 @@ function AlphaKeyboard({ onKeyPress, onDelete, onSubmit, canSubmit }) {
   return <View style={styles.alphaKeyboard}>{alphaKeyboardRows.map((row) => <View key={row.join("")} style={styles.alphaRow}>{row.map((key) => <KeyButton key={key} label={key} onPress={() => onKeyPress(key)} />)}</View>)}<View style={styles.alphaActions}><KeyButton label="DELETE" wide onPress={onDelete} /><KeyButton label="SUBMIT" wide onPress={onSubmit} disabled={!canSubmit} /></View></View>;
 }
 
-export function MemorySpanGame({ onExit }) {
-  const [selectedDifficulty, setSelectedDifficulty] = useState(difficultyOptions[0]);
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's ladder
+// of nine sequences (DAILY_LADDER), then onFinish({ score, metrics, trials }).
+export function MemorySpanGame({ onExit, daily = null }) {
+  const [selectedDifficulty, setSelectedDifficulty] = useState(DIFFICULTY_OPTIONS[0]);
   const [sequenceLength, setSequenceLength] = useState(5);
-  const [phase, setPhase] = useState("difficulty");
-  const [direction, setDirection] = useState("forward");
-  const [sequence, setSequence] = useState([]);
+  const [phase, setPhase] = useState(daily ? "ready" : "difficulty");
+  const [round, setRound] = useState(null);
+  const [roundIndex, setRoundIndex] = useState(0);
   const [displaySymbol, setDisplaySymbol] = useState("");
   const [displayIndex, setDisplayIndex] = useState(0);
   const [enteredValue, setEnteredValue] = useState("");
   const [result, setResult] = useState(null);
 
   const timeouts = useRef([]);
-  const phaseRef = useRef("difficulty");
+  const phaseRef = useRef(daily ? "ready" : "difficulty");
+  const ladderRef = useRef(daily ? buildDailyLadder(daily.seed) : []);
+  const resultsRef = useRef([]);
+  const recallStartedAt = useRef(0);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
+  useEffect(() => { if (daily) setRound(ladderRef.current[0]); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => { timeouts.current.forEach(clearTimeout); endVoiceSession(); }, []);
+
+  const config = round?.config ?? selectedDifficulty;
+  const length = round?.length ?? sequenceLength;
+  const direction = round?.direction ?? "forward";
+  const sequence = round?.sequence ?? [];
+  const totalRounds = daily ? DAILY_LADDER.length : 1;
 
   function clearAllTimeouts() { timeouts.current.forEach(clearTimeout); timeouts.current = []; }
   function resetRun(nextDifficulty = selectedDifficulty, nextLength = sequenceLength) {
@@ -85,8 +64,8 @@ export function MemorySpanGame({ onExit }) {
     setSelectedDifficulty(nextDifficulty ?? selectedDifficulty);
     setSequenceLength(nextLength);
     setPhase(nextDifficulty ? "ready" : "difficulty");
-    setDirection(nextDifficulty ? buildDirection() : "forward");
-    setSequence([]); setDisplaySymbol(""); setDisplayIndex(0); setEnteredValue(""); setResult(null);
+    setRound(nextDifficulty ? buildRound({ difficulty: (nextDifficulty ?? selectedDifficulty).key, length: nextLength }, randomSeed()) : null);
+    setDisplaySymbol(""); setDisplayIndex(0); setEnteredValue(""); setResult(null);
   }
 
   const { isReturning, missionStyle, preflightStyle, startMission, returnToPreflight } = useMissionTransition({
@@ -95,21 +74,20 @@ export function MemorySpanGame({ onExit }) {
   });
 
   async function speakItem(items, index) {
-    if (index >= items.length) { setDisplaySymbol(""); setPhase("recall"); return; }
+    if (index >= items.length) { setDisplaySymbol(""); recallStartedAt.current = Date.now(); setPhase("recall"); return; }
     const item = items[index];
     setDisplayIndex(index + 1);
-    setDisplaySymbol(selectedDifficulty.showCharacters ? item.symbol : "");
+    setDisplaySymbol(config.showCharacters ? item.symbol : "");
     await ensureAudioReady();
-    speak(item.spoken, { language: "en-US", rate: selectedDifficulty.allowLetters ? 0.88 : 0.84, pitch: 1, onDone: () => {
-      timeouts.current.push(setTimeout(() => { if (phaseRef.current === "playing") speakItem(items, index + 1); }, selectedDifficulty.allowLetters ? 260 : 340));
+    speak(item.spoken, { language: "en-US", rate: config.allowLetters ? 0.88 : 0.84, pitch: 1, onDone: () => {
+      timeouts.current.push(setTimeout(() => { if (phaseRef.current === "playing") speakItem(items, index + 1); }, config.allowLetters ? 260 : 340));
     }});
   }
 
   async function startSequence() {
     clearAllTimeouts(); stopSpeaking();
-    const nextDirection = selectedDifficulty.revealDirectionEarly ? direction : buildDirection();
-    const nextSequence = buildSequence(sequenceLength, selectedDifficulty.allowLetters);
-    setDirection(nextDirection); setSequence(nextSequence); setDisplaySymbol(""); setDisplayIndex(0); setEnteredValue(""); setResult(null); setPhase("playing");
+    const current = round ?? buildRound({ difficulty: selectedDifficulty.key, length: sequenceLength }, randomSeed());
+    setRound(current); setDisplaySymbol(""); setDisplayIndex(0); setEnteredValue(""); setResult(null); setPhase("playing");
     await ensureAudioReady();
     requestAnimationFrame(() => {
       if (phaseRef.current !== "playing") return;
@@ -117,7 +95,7 @@ export function MemorySpanGame({ onExit }) {
       const beginFirstItem = () => {
         if (hasStarted) return;
         hasStarted = true;
-        if (phaseRef.current === "playing") speakItem(nextSequence, 0);
+        if (phaseRef.current === "playing") speakItem(current.sequence, 0);
       };
       void startVoiceSession().then(beginFirstItem, beginFirstItem);
       timeouts.current.push(setTimeout(beginFirstItem, 220));
@@ -126,17 +104,34 @@ export function MemorySpanGame({ onExit }) {
 
   function appendCharacter(character) { if (phase === "recall" && enteredValue.length < sequence.length) setEnteredValue((value) => `${value}${character}`); }
   function removeCharacter() { if (phase === "recall") setEnteredValue((value) => value.slice(0, -1)); }
-  function submitAnswer() { if (phase === "recall") { setResult(computeResult(sequence, enteredValue, direction)); setPhase("result"); } }
+  function submitAnswer() {
+    if (phase !== "recall") return;
+    const outcome = computeResult(sequence, enteredValue, direction);
+    if (daily) resultsRef.current = [...resultsRef.current, { ...outcome, length: round.length, difficulty: round.difficulty, ms: Date.now() - recallStartedAt.current }];
+    setResult(outcome); setPhase("result");
+  }
+  function nextSequence() {
+    void triggerSelectionHaptic();
+    const next = roundIndex + 1;
+    if (next >= ladderRef.current.length) { endVoiceSession(); daily.onFinish(dailyResult(resultsRef.current)); return; }
+    clearAllTimeouts(); stopSpeaking();
+    setRoundIndex(next); setRound(ladderRef.current[next]); setDisplaySymbol(""); setDisplayIndex(0); setEnteredValue(""); setResult(null); setPhase("ready");
+  }
 
-  const preflightScreen = <GameSetupShell title="Memory Sequences" categoryKey="memory" onExit={onExit} onStart={() => startMission(() => resetRun(selectedDifficulty, sequenceLength))} rules="Tests immediate sequence recall. Memorize the sequence, then enter it in the requested order. Easy: visible digits and direction shown early. Medium: visible digits with a direction revealed only at recall. Hard: audio-only NATO-style letters and digits."><PickerSetting label="Difficulty" options={difficultyOptions.map((option) => ({ value: option, label: option.label }))} value={selectedDifficulty} onChange={setSelectedDifficulty} /><PickerSetting label="Sequence length" options={Array.from({ length: 9 }, (_, index) => ({ value: index + 2, label: String(index + 2) }))} value={sequenceLength} onChange={setSequenceLength} /></GameSetupShell>;
+  const readyHelper = daily
+    ? `${config.showCharacters ? "Digits on screen and spoken" : "Letters and digits, spoken only"} · ${length} characters · ${config.revealDirectionEarly ? `recall ${directionLabel(direction).toLowerCase()}` : "direction revealed at recall"}`
+    : config.revealDirectionEarly ? `Recall the sequence ${directionLabel(direction).toLowerCase()}.` : "The recall direction will be revealed at the end.";
+  const preflightScreen = <GameSetupShell title="Memory Sequences" categoryKey="memory" onExit={onExit} onStart={() => startMission(() => resetRun(selectedDifficulty, sequenceLength))} rules="Tests immediate sequence recall. Memorize the sequence, then enter it in the requested order. Easy: visible digits and direction shown early. Medium: visible digits with a direction revealed only at recall. Hard: audio-only NATO-style letters and digits."><PickerSetting label="Difficulty" options={DIFFICULTY_OPTIONS.map((option) => ({ value: option, label: option.label }))} value={selectedDifficulty} onChange={setSelectedDifficulty} /><PickerSetting label="Sequence length" options={Array.from({ length: 9 }, (_, index) => ({ value: index + 2, label: String(index + 2) }))} value={sequenceLength} onChange={setSequenceLength} /></GameSetupShell>;
   return <View style={styles.container}>
     {phase === "difficulty" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflightScreen}</Animated.View> : null}
-    {phase !== "difficulty" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionScreen, missionStyle]}>
-      <View style={styles.headerRow}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
-      {phase === "ready" ? <Pressable onPress={startSequence} style={styles.readyPanel}><Text style={styles.kicker}>MEMORY</Text><Text style={styles.title}>Ready to memorize?</Text><Text style={styles.helper}>{selectedDifficulty.revealDirectionEarly ? `Recall the sequence ${directionLabel(direction).toLowerCase()}.` : "The recall direction will be revealed at the end."}</Text><PulsingPrompt color={MEMORY_ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt></Pressable> : null}
-      {phase === "playing" ? <Animated.View entering={FadeIn.duration(160)} style={styles.playPanel}><Text style={styles.kicker}>{selectedDifficulty.showCharacters ? `MEMORIZE ${displayIndex} / ${sequenceLength}` : `LISTEN ${displayIndex} / ${sequenceLength}`}</Text><Text style={styles.title}>{selectedDifficulty.showCharacters ? "Hold the sequence" : "Listen closely"}</Text><View style={[styles.symbolCard, { borderColor: `${MEMORY_ACCENT}90` }]}><Text style={[styles.symbol, !displaySymbol && styles.symbolPlaceholder]}>{displaySymbol}</Text></View></Animated.View> : null}
-      {phase === "recall" ? <Animated.View entering={FadeIn.duration(180)} style={styles.recallPanel}><Text style={styles.kicker}>RECALL · {directionLabel(direction)}</Text><Text style={styles.title}>Enter the sequence</Text><View style={styles.answerScreen}><Text style={[styles.answerValue, !enteredValue && styles.answerDirectionPlaceholder]}>{enteredValue.split("").join(" ") || (direction === "reverse" ? "←" : "→")}</Text><Text style={styles.answerMeta}>{enteredValue.length} / {sequence.length}</Text></View>{selectedDifficulty.allowLetters ? <AlphaKeyboard onKeyPress={appendCharacter} onDelete={removeCharacter} onSubmit={submitAnswer} canSubmit={enteredValue.length > 0} /> : <NumericKeyboard onKeyPress={appendCharacter} onDelete={removeCharacter} onSubmit={submitAnswer} canSubmit={enteredValue.length > 0} />}</Animated.View> : null}
-      {phase === "result" && result ? <Animated.View entering={FadeIn.duration(180)} style={styles.resultPanel}><Text style={styles.kicker}>SESSION ENDED</Text><Text style={styles.title}>{result.accuracy}% accuracy</Text><Text style={styles.helper}>{result.wrongDirection ? "Wrong direction." : `${result.correctPositions} of ${result.total} positions correct.`}</Text><View style={styles.resultCard}><Text style={styles.resultLabel}>EXPECTED</Text><Text style={styles.resultValue}>{result.targetDisplay}</Text><Text style={styles.resultLabel}>YOUR RESPONSE</Text><View style={styles.responseSequence}>{result.enteredSymbols.length ? result.enteredSymbols.map((symbol, index) => <Text key={`${symbol}-${index}`} style={[styles.responseSymbol, { color: symbol === result.targetSymbols[index] ? SUCCESS_COLOR : ERROR_COLOR }]}>{symbol}</Text>) : <Text style={styles.resultValue}>—</Text>}</View></View><View style={styles.footerActions}><TouchableOpacity activeOpacity={0.9} onPress={() => resetRun(selectedDifficulty, sequenceLength)} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.9} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Change settings</Text></TouchableOpacity></View></Animated.View> : null}
+    {phase !== "difficulty" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionScreen, !daily && missionStyle]}>
+      <View style={styles.headerRow}><Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
+      {phase === "ready" ? <Pressable onPress={startSequence} style={styles.readyPanel}><Text style={styles.kicker}>{daily ? `DAILY TRAINING · SEQUENCE ${roundIndex + 1} / ${totalRounds}` : "MEMORY"}</Text><Text style={styles.title}>Ready to memorize?</Text><Text style={styles.helper}>{readyHelper}</Text><PulsingPrompt color={MEMORY_ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt></Pressable> : null}
+      {phase === "playing" ? <Animated.View entering={FadeIn.duration(160)} style={styles.playPanel}><Text style={styles.kicker}>{config.showCharacters ? `MEMORIZE ${displayIndex} / ${length}` : `LISTEN ${displayIndex} / ${length}`}</Text><Text style={styles.title}>{config.showCharacters ? "Hold the sequence" : "Listen closely"}</Text><View style={[styles.symbolCard, { borderColor: `${MEMORY_ACCENT}90` }]}><Text style={[styles.symbol, !displaySymbol && styles.symbolPlaceholder]}>{displaySymbol}</Text></View></Animated.View> : null}
+      {phase === "recall" ? <Animated.View entering={FadeIn.duration(180)} style={styles.recallPanel}><Text style={styles.kicker}>RECALL · {directionLabel(direction)}{daily ? ` · ${roundIndex + 1} / ${totalRounds}` : ""}</Text><Text style={styles.title}>Enter the sequence</Text><View style={styles.answerScreen}><Text style={[styles.answerValue, !enteredValue && styles.answerDirectionPlaceholder]}>{enteredValue.split("").join(" ") || (direction === "reverse" ? "←" : "→")}</Text><Text style={styles.answerMeta}>{enteredValue.length} / {sequence.length}</Text></View>{config.allowLetters ? <AlphaKeyboard onKeyPress={appendCharacter} onDelete={removeCharacter} onSubmit={submitAnswer} canSubmit={enteredValue.length > 0} /> : <NumericKeyboard onKeyPress={appendCharacter} onDelete={removeCharacter} onSubmit={submitAnswer} canSubmit={enteredValue.length > 0} />}</Animated.View> : null}
+      {phase === "result" && result ? <Animated.View entering={FadeIn.duration(180)} style={styles.resultPanel}><Text style={styles.kicker}>{daily ? `SEQUENCE ${roundIndex + 1} / ${totalRounds} · ${Math.round(sequencePoints(result))} POINTS` : "SESSION ENDED"}</Text><Text style={styles.title}>{result.accuracy}% accuracy</Text><Text style={styles.helper}>{result.wrongDirection ? "Wrong direction." : `${result.correctPositions} of ${result.total} positions correct.`}</Text><View style={styles.resultCard}><Text style={styles.resultLabel}>EXPECTED</Text><Text style={styles.resultValue}>{result.targetDisplay}</Text><Text style={styles.resultLabel}>YOUR RESPONSE</Text><View style={styles.responseSequence}>{result.enteredSymbols.length ? result.enteredSymbols.map((symbol, index) => <Text key={`${symbol}-${index}`} style={[styles.responseSymbol, { color: symbol === result.targetSymbols[index] ? SUCCESS_COLOR : ERROR_COLOR }]}>{symbol}</Text>) : <Text style={styles.resultValue}>—</Text>}</View></View><View style={styles.footerActions}>{daily
+        ? <TouchableOpacity activeOpacity={0.9} onPress={nextSequence} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{roundIndex + 1 >= totalRounds ? "View results" : "Next sequence"}</Text></TouchableOpacity>
+        : <><TouchableOpacity activeOpacity={0.9} onPress={() => resetRun(selectedDifficulty, sequenceLength)} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.9} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Change settings</Text></TouchableOpacity></>}</View></Animated.View> : null}
     </Animated.View> : null}
   </View>;
 }

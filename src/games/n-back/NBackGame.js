@@ -2,7 +2,7 @@ import { createAudioPlayer } from "expo-audio";
 import { Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
 import Animated, { FadeIn } from "react-native-reanimated";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { GameSetupShell, PickerSetting } from "../../components/GameSetupShell";
 import { PulsingPrompt } from "../../components/PulsingPrompt";
@@ -11,40 +11,11 @@ import { SPACE_CADET } from "../../theme/spaceCadet";
 import { ensureAudioReady as ensureAppAudioReady } from "../../utils/audio";
 import { endVoiceSession, say, startVoiceSession, stopSpeaking } from "../../utils/voice";
 import { triggerSelectionHaptic } from "../../utils/haptics";
+import { randomSeed } from "../../utils/random";
+import { buildBlock, buildDailyBlocks, countTargets, dailyResult, DIFFICULTY_OPTIONS, getChannelSummary, GRID_POSITIONS, START_DELAY_MS, STIMULUS_VISIBLE_MS, TOTAL_TRIALS } from "./logic";
 
-const TOTAL_TRIALS = 30;
-const START_DELAY_MS = 1100;
-const TRIAL_INTERVAL_MS = 1700;
-const STIMULUS_VISIBLE_MS = 760;
 const GRID_GAP = 10;
 const ACCENT = SPACE_CADET.memory;
-const DIGIT_WORDS = { 0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine" };
-const LETTER_POOL = ["A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P", "R"];
-const ALPHANUMERIC_POOL = [..."0123456789", ...LETTER_POOL].map((symbol) => ({ symbol, spoken: DIGIT_WORDS[symbol] ?? symbol.toLowerCase() }));
-const GRID_POSITIONS = Array.from({ length: 9 }, (_, index) => index);
-
-const difficultyOptions = [
-  { key: "easy", label: "EASY", recommendedN: 1, channels: ["audio"], showCharacter: true, showGrid: false, minimumTargets: 10, ready: "Listen to each character. Tap when it repeats N steps back." },
-  { key: "medium", label: "MEDIUM", recommendedN: 2, channels: ["visual"], showCharacter: false, showGrid: true, minimumTargets: 10, ready: "Watch the lit square. Tap when its position repeats N steps back." },
-  { key: "hard", label: "HARD", recommendedN: 2, channels: ["audio", "visual"], showCharacter: false, showGrid: true, minimumTargets: 12, ready: "Monitor both streams. Use the left control for audio and right for position." },
-];
-
-function randomItem(items) { return items[Math.floor(Math.random() * items.length)]; }
-function shuffle(items) { const copy = [...items]; for (let index = copy.length - 1; index > 0; index -= 1) { const swap = Math.floor(Math.random() * (index + 1)); [copy[index], copy[swap]] = [copy[swap], copy[index]]; } return copy; }
-function pickDifferent(pool, current) { return randomItem(pool.filter((item) => item !== current)); }
-function buildSequence(pool, length, nValue, minimumTargets) {
-  const targetIndices = new Set(shuffle(Array.from({ length: Math.max(0, length - nValue) }, (_, index) => index + nValue)).slice(0, minimumTargets + Math.floor(Math.random() * 3)));
-  const sequence = [];
-  for (let index = 0; index < length; index += 1) sequence.push(index < nValue ? randomItem(pool) : targetIndices.has(index) ? sequence[index - nValue] : pickDifferent(pool, sequence[index - nValue]));
-  return sequence;
-}
-function countTargets(sequence, nValue) { return sequence.reduce((count, item, index) => count + Number(index >= nValue && item === sequence[index - nValue]), 0); }
-function getChannelSummary({ hits, misses, falseAlarms, targets, reactionTimes, evaluatedTrials }) {
-  const nonTargets = Math.max(evaluatedTrials - targets, 0);
-  const correctRejections = Math.max(nonTargets - falseAlarms, 0);
-  return { accuracy: evaluatedTrials ? Math.round(((hits + correctRejections) / evaluatedTrials) * 100) : 0, hits, misses, falseAlarms, targets, average: reactionTimes.length ? Math.round(reactionTimes.reduce((sum, value) => sum + value, 0) / reactionTimes.length) : null };
-}
-
 function ControlIcon({ type, size = 28, color = SPACE_CADET.black }) {
   if (type === "audio") return <Svg width={size} height={size} viewBox="0 0 32 32"><Path d="M7 18H12L18 23V9L12 14H7Z" fill="none" stroke={color} strokeWidth="2.2" strokeLinejoin="round" /><Path d="M22 12c2 1.5 3 2.7 3 4s-1 2.5-3 4" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" /></Svg>;
   return <Svg width={size} height={size} viewBox="0 0 32 32"><Path d="M3 16c3.5-6.5 8-10 13-10s9.5 3.5 13 10c-3.5 6.5-8 10-13 10S6.5 22.5 3 16Z" fill="none" stroke={color} strokeWidth="2.2" /><Circle cx="16" cy="16" r="4.2" fill="none" stroke={color} strokeWidth="2.2" /></Svg>;
@@ -59,22 +30,26 @@ function SummaryCard({ label, result }) {
   return <View style={styles.summaryCard}><Text style={styles.summaryChannel}>{label}</Text><Text style={styles.summaryMetric}>{result.accuracy}% accuracy</Text><Text style={styles.summaryLine}>Matches <Text style={styles.summaryValue}>{result.hits} / {result.targets}</Text></Text><Text style={styles.summaryLine}>Misses <Text style={styles.summaryValue}>{result.misses}</Text></Text><Text style={styles.summaryLine}>False alarms <Text style={styles.summaryValue}>{result.falseAlarms}</Text></Text><Text style={styles.summaryLine}>Average response <Text style={styles.summaryValue}>{result.average !== null ? `${result.average} ms` : "—"}</Text></Text></View>;
 }
 
-export function NBackGame({ onExit }) {
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's three
+// blocks (characters 2-back, positions 2-back, then the day's hard block), then onFinish({ score, metrics, trials }).
+export function NBackGame({ onExit, daily = null }) {
   const { width } = useWindowDimensions();
   const matrixSize = Math.min(width - 82, 300);
   const cellSize = (matrixSize - GRID_GAP * 2) / 3;
-  const [difficulty, setDifficulty] = useState(difficultyOptions[0]);
-  const [nValue, setNValue] = useState(1);
-  const [phase, setPhase] = useState("preflight");
+  const [selectedDifficulty, setSelectedDifficulty] = useState(DIFFICULTY_OPTIONS[0]);
+  const [selectedN, setSelectedN] = useState(1);
+  const [blockIndex, setBlockIndex] = useState(0);
+  const [phase, setPhase] = useState(daily ? "ready" : "preflight");
   const [audioItem, setAudioItem] = useState(null);
   const [visualIndex, setVisualIndex] = useState(null);
   const [progress, setProgress] = useState(0);
   const [feedback, setFeedback] = useState({ audio: "idle", visual: "idle" });
   const [summary, setSummary] = useState({ audio: null, visual: null });
   const timers = useRef([]);
-  const phaseRef = useRef("preflight");
-  const audioSequence = useRef([]);
-  const visualSequence = useRef([]);
+  const phaseRef = useRef(daily ? "ready" : "preflight");
+  const blocksRef = useRef(daily ? buildDailyBlocks(daily.seed) : []);
+  const blockRef = useRef(daily ? blocksRef.current[0] : null);
+  const resultsRef = useRef([]);
   const trialIndex = useRef(-1);
   const trialStarted = useRef(0);
   const responses = useRef([]);
@@ -84,8 +59,14 @@ export function NBackGame({ onExit }) {
   const beepWarmed = useRef(false);
   const { isReturning, missionStyle, preflightStyle, startMission, returnToPreflight } = useMissionTransition({ onPrepareReturn: clearTimers, onReturnComplete: resetToPreflight });
 
+  const dailyBlock = daily ? blocksRef.current[blockIndex] : null;
+  const difficulty = dailyBlock ? dailyBlock.config : selectedDifficulty;
+  const nValue = dailyBlock ? dailyBlock.nValue : selectedN;
+  const trials = dailyBlock ? dailyBlock.trials : TOTAL_TRIALS;
+  const activeChannels = difficulty.channels;
+
   useEffect(() => { phaseRef.current = phase; }, [phase]);
-  useEffect(() => { void prepareAudio(); return () => { clearTimers(); endVoiceSession(); beep.current?.remove(); }; }, []);
+  useEffect(() => { void prepareAudio(); return () => { clearTimers(); endVoiceSession(); beep.current?.remove(); }; }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function clearTimers() { timers.current.forEach(clearTimeout); timers.current = []; }
   async function prepareAudio() {
@@ -109,50 +90,65 @@ export function NBackGame({ onExit }) {
     clearTimers(); stopSpeaking(); setAudioItem(null); setVisualIndex(null); setProgress(0); setFeedback({ audio: "idle", visual: "idle" }); setSummary({ audio: null, visual: null }); setPhase("ready");
     void prepareAudio();
   }
-  function buildStats(nextAudio, nextVisual) {
-    return { evaluated: TOTAL_TRIALS - nValue, audioTargets: difficulty.channels.includes("audio") ? countTargets(nextAudio, nValue) : 0, visualTargets: difficulty.channels.includes("visual") ? countTargets(nextVisual, nValue) : 0, audioHits: 0, audioMisses: 0, audioFalse: 0, visualHits: 0, visualMisses: 0, visualFalse: 0, audioTimes: [], visualTimes: [] };
+  function buildStats(current) {
+    return { evaluated: current.trials - current.nValue, audioTargets: current.config.channels.includes("audio") ? countTargets(current.audio, current.nValue) : 0, visualTargets: current.config.channels.includes("visual") ? countTargets(current.visual, current.nValue) : 0, audioHits: 0, audioMisses: 0, audioFalse: 0, visualHits: 0, visualMisses: 0, visualFalse: 0, audioTimes: [], visualTimes: [] };
   }
   async function beginRun() {
     await prepareAudio();
-    if (difficulty.channels.includes("audio")) await startVoiceSession();
-    const nextAudio = difficulty.channels.includes("audio") ? buildSequence(ALPHANUMERIC_POOL, TOTAL_TRIALS, nValue, difficulty.minimumTargets) : [];
-    const nextVisual = difficulty.channels.includes("visual") ? buildSequence(GRID_POSITIONS, TOTAL_TRIALS, nValue, difficulty.minimumTargets) : [];
-    audioSequence.current = nextAudio; visualSequence.current = nextVisual; stats.current = buildStats(nextAudio, nextVisual); responses.current = Array.from({ length: TOTAL_TRIALS }, () => ({ audio: false, visual: false })); trialIndex.current = -1; setProgress(0); setSummary({ audio: null, visual: null }); setPhase("playing");
+    const current = daily ? blocksRef.current[blockIndex] : buildBlock({ difficulty: selectedDifficulty.key, nValue: selectedN }, randomSeed());
+    blockRef.current = current;
+    if (current.config.channels.includes("audio")) await startVoiceSession();
+    stats.current = buildStats(current); responses.current = Array.from({ length: current.trials }, () => ({ audio: false, visual: false })); trialIndex.current = -1; setProgress(0); setSummary({ audio: null, visual: null }); setPhase("playing");
     timers.current.push(setTimeout(() => scheduleTrial(0), START_DELAY_MS));
   }
   async function playBeep() { try { if (!beep.current) return; await beep.current.seekTo(0); beep.current.play(); } catch {} }
   function speak(item) { if (!item) return; say(item.spoken, { language: "en-US", rate: 0.92, pitch: 1 }); }
   function commitMisses(index) {
-    if (index < nValue) return;
+    const current = blockRef.current;
+    if (index < current.nValue) return;
     const response = responses.current[index];
-    if (difficulty.channels.includes("audio") && audioSequence.current[index] === audioSequence.current[index - nValue] && !response.audio) stats.current.audioMisses += 1;
-    if (difficulty.channels.includes("visual") && visualSequence.current[index] === visualSequence.current[index - nValue] && !response.visual) stats.current.visualMisses += 1;
+    if (current.config.channels.includes("audio") && current.audio[index] === current.audio[index - current.nValue] && !response.audio) stats.current.audioMisses += 1;
+    if (current.config.channels.includes("visual") && current.visual[index] === current.visual[index - current.nValue] && !response.visual) stats.current.visualMisses += 1;
   }
   function scheduleTrial(index) {
-    if (index >= TOTAL_TRIALS) { finishRun(); return; }
+    const current = blockRef.current;
+    if (index >= current.trials) { finishRun(); return; }
     trialIndex.current = index; trialStarted.current = Date.now(); responses.current[index] = { audio: false, visual: false }; setProgress(index + 1); setFeedback({ audio: "idle", visual: "idle" });
-    const nextAudio = difficulty.channels.includes("audio") ? audioSequence.current[index] : null;
-    const nextVisual = difficulty.channels.includes("visual") ? visualSequence.current[index] : null;
-    setAudioItem(difficulty.showCharacter ? nextAudio : null); setVisualIndex(nextVisual);
-    if (difficulty.channels.includes("audio")) speak(nextAudio);
-    if (difficulty.channels.includes("visual")) void playBeep();
+    const nextAudio = current.config.channels.includes("audio") ? current.audio[index] : null;
+    const nextVisual = current.config.channels.includes("visual") ? current.visual[index] : null;
+    setAudioItem(current.config.showCharacter ? nextAudio : null); setVisualIndex(nextVisual);
+    if (current.config.channels.includes("audio")) speak(nextAudio);
+    if (current.config.channels.includes("visual")) void playBeep();
     timers.current.push(setTimeout(() => { if (phaseRef.current === "playing") { setAudioItem(null); setVisualIndex(null); } }, STIMULUS_VISIBLE_MS));
-    timers.current.push(setTimeout(() => { if (phaseRef.current === "playing") { commitMisses(index); scheduleTrial(index + 1); } }, TRIAL_INTERVAL_MS));
+    timers.current.push(setTimeout(() => { if (phaseRef.current === "playing") { commitMisses(index); scheduleTrial(index + 1); } }, current.intervalMs));
   }
   function finishRun() {
-    clearTimers(); stopSpeaking(); setAudioItem(null); setVisualIndex(null); setFeedback({ audio: "idle", visual: "idle" }); const current = stats.current;
+    clearTimers(); stopSpeaking(); setAudioItem(null); setVisualIndex(null); setFeedback({ audio: "idle", visual: "idle" });
+    const current = stats.current;
+    const played = blockRef.current;
+    if (daily) {
+      const channels = {};
+      if (played.config.channels.includes("audio")) channels.audio = { hits: current.audioHits, falseAlarms: current.audioFalse, targets: current.audioTargets };
+      if (played.config.channels.includes("visual")) channels.visual = { hits: current.visualHits, falseAlarms: current.visualFalse, targets: current.visualTargets };
+      resultsRef.current = [...resultsRef.current, { key: played.key, weight: played.weight, channels, evaluatedTrials: current.evaluated }];
+      if (blockIndex + 1 < blocksRef.current.length) { setBlockIndex(blockIndex + 1); setProgress(0); setPhase("ready"); return; }
+      endVoiceSession();
+      daily.onFinish(dailyResult(resultsRef.current));
+      return;
+    }
     setSummary({
-      audio: difficulty.channels.includes("audio") ? getChannelSummary({ hits: current.audioHits, misses: current.audioMisses, falseAlarms: current.audioFalse, targets: current.audioTargets, reactionTimes: current.audioTimes, evaluatedTrials: current.evaluated }) : null,
-      visual: difficulty.channels.includes("visual") ? getChannelSummary({ hits: current.visualHits, misses: current.visualMisses, falseAlarms: current.visualFalse, targets: current.visualTargets, reactionTimes: current.visualTimes, evaluatedTrials: current.evaluated }) : null,
+      audio: played.config.channels.includes("audio") ? getChannelSummary({ hits: current.audioHits, misses: current.audioMisses, falseAlarms: current.audioFalse, targets: current.audioTargets, reactionTimes: current.audioTimes, evaluatedTrials: current.evaluated }) : null,
+      visual: played.config.channels.includes("visual") ? getChannelSummary({ hits: current.visualHits, misses: current.visualMisses, falseAlarms: current.visualFalse, targets: current.visualTargets, reactionTimes: current.visualTimes, evaluatedTrials: current.evaluated }) : null,
     }); setPhase("summary");
   }
   async function register(channel) {
     if (phase !== "playing" || trialIndex.current < 0) return;
+    const current = blockRef.current;
     const index = trialIndex.current; const currentResponse = responses.current[index];
     if (currentResponse[channel]) return;
     currentResponse[channel] = true; await triggerSelectionHaptic();
-    const target = index >= nValue && (channel === "audio" ? audioSequence.current[index] === audioSequence.current[index - nValue] : visualSequence.current[index] === visualSequence.current[index - nValue]);
-    setFeedback((current) => ({ ...current, [channel]: target ? "correct" : "wrong" }));
+    const target = index >= current.nValue && (channel === "audio" ? current.audio[index] === current.audio[index - current.nValue] : current.visual[index] === current.visual[index - current.nValue]);
+    setFeedback((state) => ({ ...state, [channel]: target ? "correct" : "wrong" }));
     if (target) {
       if (channel === "audio") { stats.current.audioHits += 1; stats.current.audioTimes.push(Date.now() - trialStarted.current); }
       else { stats.current.visualHits += 1; stats.current.visualTimes.push(Date.now() - trialStarted.current); }
@@ -160,16 +156,15 @@ export function NBackGame({ onExit }) {
     else stats.current.visualFalse += 1;
   }
 
-  const preflight = <GameSetupShell title="N-back" categoryKey="memory" onExit={onExit} onStart={() => startMission(resetToReady)} rules="Tests working-memory updating. Mark a match when the current item repeats the item from N steps earlier.Easy: Listen for repeated characters.Medium: Watch for repeated grid positions.Hard: Monitor both channels at once."><PickerSetting label="Difficulty" options={difficultyOptions.map((option) => ({ value: option, label: option.label }))} value={difficulty} onChange={setDifficulty} /><PickerSetting label="N value" options={[1, 2, 3, 4, 5].map((value) => ({ value, label: String(value) }))} value={nValue} onChange={setNValue} /></GameSetupShell>;
-  const activeChannels = difficulty.channels;
+  const preflight = <GameSetupShell title="N-back" categoryKey="memory" onExit={onExit} onStart={() => startMission(resetToReady)} rules="Tests working-memory updating. Mark a match when the current item repeats the item from N steps earlier.Easy: Listen for repeated characters.Medium: Watch for repeated grid positions.Hard: Monitor both channels at once."><PickerSetting label="Difficulty" options={DIFFICULTY_OPTIONS.map((option) => ({ value: option, label: option.label }))} value={selectedDifficulty} onChange={setSelectedDifficulty} /><PickerSetting label="N value" options={[1, 2, 3, 4, 5].map((value) => ({ value, label: String(value) }))} value={selectedN} onChange={setSelectedN} /></GameSetupShell>;
 
   return <View style={styles.container}>
     {phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}
-    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, missionStyle]}>
-      <View style={styles.header}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
-      {phase === "ready" ? <Pressable onPress={beginRun} style={styles.readyScreen}><Text style={styles.kicker}>MEMORY</Text><Text style={styles.readyTitle}>Ready for {nValue}-back?</Text><Text style={styles.readyText}>{difficulty.ready}</Text>{difficulty.showGrid ? <View style={styles.readyGrid}><GridMatrix activeIndex={4} cellSize={cellSize * 0.62} /></View> : null}<PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt></Pressable> : null}
-      {phase === "playing" ? <Animated.View entering={FadeIn.duration(160)} style={styles.playScreen}><Text style={styles.progress}>TRIAL {progress} / {TOTAL_TRIALS} · {nValue}-BACK</Text><View style={styles.stage}>{difficulty.showGrid ? <GridMatrix activeIndex={visualIndex} cellSize={cellSize} /> : null}{difficulty.showCharacter ? <Text style={styles.character}>{audioItem?.symbol ?? ""}</Text> : null}</View><View style={[styles.responseRow, activeChannels.length === 1 && styles.responseRowSingle]}>{activeChannels.map((channel) => <Pressable key={channel} onPressIn={() => register(channel)} style={({ pressed }) => [styles.responseButton, activeChannels.length === 1 && styles.responseButtonSingle, feedback[channel] === "correct" && styles.responseCorrect, feedback[channel] === "wrong" && styles.responseWrong, pressed && styles.pressed]}>{activeChannels.length === 2 ? <ControlIcon type={channel} /> : <Text style={styles.matchText}>MATCH</Text>}</Pressable>)}</View></Animated.View> : null}
-      {phase === "summary" ? <Animated.View entering={FadeIn.duration(180)} style={styles.summaryScreen}><Text style={styles.kicker}>SESSION ENDED</Text><Text style={styles.summaryTitle}>{nValue}-back complete</Text><Text style={styles.summaryCaption}>{TOTAL_TRIALS} stimuli processed</Text><SummaryCard label="AUDIO" result={summary.audio} /><SummaryCard label="POSITION" result={summary.visual} /><View style={styles.actions}><TouchableOpacity activeOpacity={0.88} onPress={resetToReady} style={styles.primaryButton}><Text style={styles.primaryText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.88} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryText}>Change settings</Text></TouchableOpacity></View></Animated.View> : null}
+    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, !daily && missionStyle]}>
+      <View style={styles.header}><Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
+      {phase === "ready" ? <Pressable onPress={beginRun} style={styles.readyScreen}><Text style={styles.kicker}>{daily ? `DAILY TRAINING · BLOCK ${blockIndex + 1} / ${blocksRef.current.length} · ${dailyBlock.label}` : "MEMORY"}</Text><Text style={styles.readyTitle}>Ready for {nValue}-back?</Text><Text style={styles.readyText}>{difficulty.ready}{daily ? ` ${trials} trials.` : ""}</Text>{difficulty.showGrid ? <View style={styles.readyGrid}><GridMatrix activeIndex={4} cellSize={cellSize * 0.62} /></View> : null}<PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt></Pressable> : null}
+      {phase === "playing" ? <Animated.View entering={FadeIn.duration(160)} style={styles.playScreen}><Text style={styles.progress}>TRIAL {progress} / {trials} · {nValue}-BACK{daily ? ` · BLOCK ${blockIndex + 1} / ${blocksRef.current.length}` : ""}</Text><View style={styles.stage}>{difficulty.showGrid ? <GridMatrix activeIndex={visualIndex} cellSize={cellSize} /> : null}{difficulty.showCharacter ? <Text style={styles.character}>{audioItem?.symbol ?? ""}</Text> : null}</View><View style={[styles.responseRow, activeChannels.length === 1 && styles.responseRowSingle]}>{activeChannels.map((channel) => <Pressable key={channel} onPressIn={() => register(channel)} style={({ pressed }) => [styles.responseButton, activeChannels.length === 1 && styles.responseButtonSingle, feedback[channel] === "correct" && styles.responseCorrect, feedback[channel] === "wrong" && styles.responseWrong, pressed && styles.pressed]}>{activeChannels.length === 2 ? <ControlIcon type={channel} /> : <Text style={styles.matchText}>MATCH</Text>}</Pressable>)}</View></Animated.View> : null}
+      {phase === "summary" ? <Animated.View entering={FadeIn.duration(180)} style={styles.summaryScreen}><Text style={styles.kicker}>SESSION ENDED</Text><Text style={styles.summaryTitle}>{nValue}-back complete</Text><Text style={styles.summaryCaption}>{trials} stimuli processed</Text><SummaryCard label="AUDIO" result={summary.audio} /><SummaryCard label="POSITION" result={summary.visual} /><View style={styles.actions}><TouchableOpacity activeOpacity={0.88} onPress={resetToReady} style={styles.primaryButton}><Text style={styles.primaryText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.88} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryText}>Change settings</Text></TouchableOpacity></View></Animated.View> : null}
     </Animated.View> : null}
   </View>;
 }

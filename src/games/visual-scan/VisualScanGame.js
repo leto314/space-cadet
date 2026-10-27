@@ -8,49 +8,18 @@ import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
-import { createRandom, deriveSeed, randomTools } from "../../utils/random";
+import { randomSeed } from "../../utils/random";
+import { buildDailyGrids, buildSession, CHARACTER_SETS, dailyResult, DAILY_GRIDS, DIRECTIONS, gridEntry } from "./logic";
 
 const ACCENT = SPACE_CADET.attention;
 const ACCENT_CLEAR = "rgba(216,30,91,0)";
 const ERROR_SOFT = "#3D101D";
 const DONE_BG = "#050506";
-const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const DIRECTIONS = [{ value: "forward", label: "FORWARD" }, { value: "reverse", label: "REVERSE" }];
-const CHARACTER_SETS = [{ value: "numbers", label: "NUMBERS" }, { value: "letters", label: "LETTERS" }, { value: "mixed", label: "BOTH" }];
 const FINISH_DELAY_MS = 520;
 // Taps register on touch-down on device (every ms counts here), but react-native-web never fires onPressIn inside this app's gesture root, so web falls back to onPress.
 const TAP_EVENT = Platform.OS === "web" ? "onPress" : "onPressIn";
 
-function shuffle(items, random) {
-  const copy = [...items];
-  for (let index = copy.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(random() * (index + 1));
-    [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
-  }
-  return copy;
-}
-function numbersUpTo(count) { return Array.from({ length: count }, (_, index) => String(index + 1)); }
-function lettersUpTo(count) { return LETTERS.slice(0, count).split(""); }
 function formatSeconds(ms) { return (ms / 1000).toFixed(1); }
-
-// `random` is injectable: the daily version passes a seeded generator instead of Math.random.
-// In "mixed" mode the starting type gets the extra character on odd grids, and both halves run in the chosen
-// direction before being interleaved: forward 1 A 2 B 3…, reverse 5 D 4 C 3… (always opening with `startsWith`).
-function buildRound({ gridSize, direction, characters }, random = Math.random) {
-  const count = gridSize * gridSize;
-  const orient = (values) => direction === "reverse" ? [...values].reverse() : values;
-  let sequence;
-  let startsWith = null;
-  if (characters === "mixed") {
-    startsWith = random() < 0.5 ? "number" : "letter";
-    const leadCount = Math.ceil(count / 2);
-    const lead = orient(startsWith === "number" ? numbersUpTo(leadCount) : lettersUpTo(leadCount));
-    const follow = orient(startsWith === "number" ? lettersUpTo(count - leadCount) : numbersUpTo(count - leadCount));
-    sequence = lead.flatMap((value, index) => index < follow.length ? [value, follow[index]] : [value]);
-  } else sequence = orient(characters === "letters" ? lettersUpTo(count) : numbersUpTo(count));
-  const cells = shuffle(sequence, random);
-  return { sequence, cells, ranks: cells.map((label) => sequence.indexOf(label)), startsWith };
-}
 
 function cueLabel(round, direction) {
   if (round.startsWith) return `START WITH A ${round.startsWith.toUpperCase()}`;
@@ -115,43 +84,6 @@ function ScanGrid({ round, gridSize, progress, errorFlash, onTap }) {
 }
 
 
-// Points of a grid (0–100): a time share, minus error penalties. The time share is 100 at or under `fast` and
-// 0 at `slow`, both per cell and scaled by what makes a grid slower to read (letters, mixing, reverse order, a
-// wider 5 × 5), with a gentle curve in between. Each error then costs a fixed amount that grows with the
-// error's rank, and small grids forgive less: one error in a 3 × 3 already costs a medium penalty.
-//   3 × 3  10, 20, 30, 40…      4 × 4  5, 10, 20, 30…      5 × 5  5, 10, 10, 20, 30…
-const CELL_FAST_MS = 350;
-const CELL_SLOW_MS = 1500;
-const CHARACTER_FACTOR = { numbers: 1, letters: 1.15, mixed: 1.35 };
-const DIRECTION_FACTOR = { forward: 1, reverse: 1.2 };
-const GRID_FACTOR = { 3: 0.95, 4: 1, 5: 1.1 };
-const ERROR_PENALTIES = { 3: [10, 20], 4: [5, 10, 20], 5: [5, 10, 10, 20] };
-const PENALTY_STEP = 10;
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-export function gridPoints({ gridSize, direction, characters }, timeMs, errors) {
-  const cells = gridSize * gridSize;
-  const factor = CHARACTER_FACTOR[characters] * DIRECTION_FACTOR[direction] * GRID_FACTOR[gridSize];
-  const fast = cells * CELL_FAST_MS * factor;
-  const slow = cells * CELL_SLOW_MS * factor;
-  const share = clamp((slow - timeMs) / (slow - fast), 0, 1);
-  const table = ERROR_PENALTIES[gridSize];
-  let penalty = 0;
-  for (let rank = 0; rank < errors; rank += 1) penalty += rank < table.length ? table[rank] : table.at(-1) + PENALTY_STEP * (rank - table.length + 1);
-  return clamp(Math.round(100 * share ** 1.2 - penalty), 0, 100);
-}
-
-// Daily training: three grids for everyone, 3 × 3, 4 × 4, 5 × 5. Each gets a different character set and its own
-// direction, drawn from the seed. The score is the three grids' points scaled to 1000 (300 → 1000).
-export const DAILY_GRIDS = [3, 4, 5];
-export function buildDailyRounds(seed) {
-  const rnd = randomTools(createRandom(seed));
-  const characters = rnd.shuffle(CHARACTER_SETS.map((option) => option.value));
-  return DAILY_GRIDS.map((gridSize, index) => {
-    const settings = { gridSize, direction: rnd.chance(0.5) ? "reverse" : "forward", characters: characters[index] };
-    return { settings, round: buildRound(settings, rnd.random) };
-  });
-}
-
 // The ready screen's illustration: a small scrambled grid, the same every time.
 const SAMPLE_CELLS = ["4", "1", "7", "2", "9", "5", "8", "3", "6"];
 function SampleGrid() {
@@ -165,7 +97,7 @@ export function VisualScanGame({ onExit, daily = null }) {
   const [gridSize, setGridSize] = useState(3);
   const [direction, setDirection] = useState("forward");
   const [characters, setCharacters] = useState("numbers");
-  const dailyRoundsRef = useRef(daily ? buildDailyRounds(deriveSeed(daily.seed, "grids")) : null);
+  const dailyRoundsRef = useRef(daily ? buildDailyGrids(daily.seed) : null);
   const [phase, setPhase] = useState(daily ? "ready" : "preflight");
   const [round, setRound] = useState(daily ? dailyRoundsRef.current[0].round : null);
   const [roundId, setRoundId] = useState(0);
@@ -202,7 +134,7 @@ export function VisualScanGame({ onExit, daily = null }) {
   function resetToReady() {
     clearTimers();
     const settings = settingsRef.current ?? { gridSize, direction, characters };
-    prepareRound(settings, buildRound(settings, createRandom(Math.floor(Math.random() * 4294967296))));
+    prepareRound(settings, buildSession(settings, randomSeed()));
   }
   function prepareRun() { settingsRef.current = { gridSize, direction, characters }; startMission(resetToReady); }
   function beginRun() {
@@ -218,8 +150,7 @@ export function VisualScanGame({ onExit, daily = null }) {
     goTo("complete");
     void triggerSuccessHaptic();
     const settings = settingsRef.current;
-    const count = roundRef.current.sequence.length;
-    const entry = { ...settings, timeMs, errors: errorsRef.current, perCellMs: Math.round(timeMs / count), accuracy: Math.round((count / tapsRef.current) * 100), points: gridPoints(settings, timeMs, errorsRef.current) };
+    const entry = gridEntry(settings, roundRef.current.sequence.length, timeMs, errorsRef.current, tapsRef.current);
     resultsRef.current = [...resultsRef.current, entry];
     setResult(entry); setResults(resultsRef.current);
     timeouts.current.push(setTimeout(() => {
@@ -228,15 +159,7 @@ export function VisualScanGame({ onExit, daily = null }) {
       finishDaily();
     }, FINISH_DELAY_MS));
   }
-  function finishDaily() {
-    const entries = resultsRef.current;
-    const points = entries.reduce((sum, entry) => sum + entry.points, 0);
-    daily.onFinish({
-      score: clamp(Math.round(points * (1000 / (entries.length * 100))), 0, 1000),
-      metrics: { grids: entries.length, totalMs: entries.reduce((sum, entry) => sum + entry.timeMs, 0), errors: entries.reduce((sum, entry) => sum + entry.errors, 0), ...Object.fromEntries(entries.map((entry) => [`grid${entry.gridSize}Points`, entry.points])) },
-      trials: entries.map((entry) => ({ ok: entry.errors ? 0 : 1, ms: entry.timeMs, pts: entry.points, errors: entry.errors, grid: entry.gridSize, direction: entry.direction, characters: entry.characters })),
-    });
-  }
+  function finishDaily() { daily.onFinish(dailyResult(resultsRef.current)); }
   function handleTap(index) {
     if (phaseRef.current !== "playing") return;
     const rank = roundRef.current.ranks[index];

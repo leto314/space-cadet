@@ -10,76 +10,11 @@ import { SPACE_CADET } from "../../theme/spaceCadet";
 import { ensureAudioReady } from "../../utils/audio";
 import { endVoiceSession, say, startVoiceSession, stopSpeaking } from "../../utils/voice";
 import { triggerSelectionHaptic } from "../../utils/haptics";
-import { createRandom, deriveSeed, randomTools } from "../../utils/random";
+import { randomSeed } from "../../utils/random";
+import { AFTER_ANSWER_MS, AFTER_MISS_MS, audioResponseTime, buildDailyTrials, buildSession, COLORS, CUE_MS, dailyResult, DAILY_LEVELS, DIFFICULTY_OPTIONS, levelOf, LIMIT_MS, STANDBY_MS, summarise, targetFor, trialPoints } from "./logic";
 
 const ACCENT = SPACE_CADET.attention;
-const COLORS = [
-  { key: "blue", label: "BLUE", hex: "#4C8DFF", soft: "#10203F" },
-  { key: "purple", label: "PURPLE", hex: "#C46BFF", soft: "#28123A" },
-  { key: "red", label: "RED", hex: "#D81E5B", soft: "#35101F" },
-  { key: "yellow", label: "YELLOW", hex: "#FFCF3D", soft: "#352A08" },
-  { key: "green", label: "GREEN", hex: "#34D399", soft: "#0C2B23" },
-  { key: "orange", label: "ORANGE", hex: "#FF741A", soft: "#3A1608" },
-];
-
-const difficultyOptions = [
-  { key: "easy", label: "EASY", allowedTargets: ["word", "color"], preannounce: true, useAudio: false },
-  { key: "medium", label: "MEDIUM", allowedTargets: ["word", "color", "audio"], preannounce: true, useAudio: true },
-  { key: "hard", label: "HARD", allowedTargets: ["word", "color", "audio"], preannounce: false, useAudio: true },
-];
-const levelOf = (key) => difficultyOptions.find((option) => option.key === key);
-
-// Timing: the cue card before the word (easy, medium), the stand-by before the word (hard), how long a word stays
-// up (no answer by then is a miss), and the pauses after an answer.
-const CUE_MS = 1450;
-const STANDBY_MS = 1050;
-const LIMIT_MS = 6000;
-const AFTER_ANSWER_MS = 460;
-const AFTER_MISS_MS = 700;
-
-// Points of a trial (0–100) from the response time of a right answer: 100 at or under `fast`, then a gentle
-// curve (power 1.5) down to 0 at the 6-second limit (a wrong answer, or none, is 0). This is a decision, not a
-// reflex, and `fast` depends on the level: with the cue known in advance a word is read quickly, with a spoken
-// colour in play there is more to sort out, and in hard the cue itself must be read first.
-//   easy (fast 600)    800 → 95 · 1000 → 89 · 1500 → 77 · 2000 → 65 · 3000 → 44 · 4000 → 25
-//   hard (fast 900)    1000 → 97 · 1500 → 83 · 1900 → 72 · 2500 → 57 · 3000 → 49 · 4000 → 25
-// When the cue is the spoken colour, the player has to hear the word before answering: the time until the voice
-// starts, plus the word itself, is taken off the response time (see AUDIO_WORD_MS).
-const FAST_MS = { easy: 600, medium: 700, hard: 900 };
-const AUDIO_WORD_MS = 350;         // about how long a colour name takes to say
-const AUDIO_FALLBACK_MS = 600;     // allowance when the voice never reports when it started
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-export function trialPoints(level, reactionMs) {
-  if (reactionMs === null || reactionMs >= LIMIT_MS) return 0;
-  const share = clamp((LIMIT_MS - reactionMs) / (LIMIT_MS - FAST_MS[level]), 0, 1);
-  return clamp(Math.round(100 * share ** 1.5), 0, 100);
-}
-
-// Daily training: ten trials for everyone, 2 easy, 2 medium (the spoken cue comes in), 6 hard.
-export const DAILY_LEVELS = ["easy", "easy", "medium", "medium", "hard", "hard", "hard", "hard", "hard", "hard"];
-
-export function buildTrials(levels, seed) {
-  const rnd = randomTools(createRandom(seed));
-  return levels.map((level) => {
-    const option = levelOf(level);
-    return { level, targetType: rnd.item(option.allowedTargets), writtenColor: rnd.item(COLORS), inkColor: rnd.item(COLORS), spokenColor: option.useAudio ? rnd.item(COLORS) : null };
-  });
-}
-
-function targetFor(trial) { return trial.targetType === "word" ? trial.writtenColor : trial.targetType === "color" ? trial.inkColor : trial.spokenColor; }
 function targetLabel(type) { return type === "word" ? "WORD" : type === "color" ? "INK COLOUR" : "AUDIO"; }
-
-function summarise(results) {
-  const right = results.filter((entry) => entry.correct);
-  const times = right.map((entry) => entry.reactionMs);
-  const points = results.reduce((sum, entry) => sum + entry.points, 0);
-  return {
-    trials: results.length, correct: right.length, errors: results.filter((entry) => !entry.correct && entry.reactionMs !== null).length, tooSlow: results.filter((entry) => entry.reactionMs === null).length,
-    score: results.length ? clamp(Math.round((points / results.length) * 10), 0, 1000) : 0,
-    accuracy: results.length ? Math.round((right.length / results.length) * 100) : 0,
-    average: times.length ? Math.round(times.reduce((sum, value) => sum + value, 0) / times.length) : null, best: times.length ? Math.min(...times) : null,
-  };
-}
 
 function TaskIcon({ type, color = SPACE_CADET.white, size = 32 }) {
   if (type === "audio") return <Svg width={size} height={size} viewBox="0 0 32 32"><Path d="M7 18H12L18 23V9L12 14H7Z" fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" /><Path d="M22 12c2 1.5 3 2.7 3 4s-1 2.5-3 4m2.8-10.5c3 2.2 4.2 4.4 4.2 6.5s-1.2 4.3-4.2 6.5" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /></Svg>;
@@ -90,7 +25,7 @@ function TaskIcon({ type, color = SPACE_CADET.white, size = 32 }) {
 // `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's ten
 // trials (DAILY_LEVELS), then onFinish({ score, metrics, trials }).
 export function SelectiveAttentionGame({ onExit, daily = null }) {
-  const [difficulty, setDifficulty] = useState(difficultyOptions[0]);
+  const [difficulty, setDifficulty] = useState(DIFFICULTY_OPTIONS[0]);
   const [roundCount, setRoundCount] = useState(6);
   const [phase, setPhase] = useState(daily ? "ready" : "preflight");
   const [trialIndex, setTrialIndex] = useState(0);
@@ -147,8 +82,7 @@ export function SelectiveAttentionGame({ onExit, daily = null }) {
     later(() => { if (startedAt.current) record(nextTrial, false, null); }, LIMIT_MS);
   }
   function beginRun() {
-    const levels = daily ? DAILY_LEVELS : Array.from({ length: roundCount }, () => difficulty.key);
-    const prepared = buildTrials(levels, daily ? deriveSeed(daily.seed, "trials") : Math.floor(Math.random() * 4294967296));
+    const prepared = daily ? buildDailyTrials(daily.seed) : buildSession({ level: difficulty.key, roundCount }, randomSeed());
     trialsRef.current = prepared; resultRef.current = []; setTrialIndex(0); setTrial(null);
     showTrial(0, prepared);
   }
@@ -166,23 +100,14 @@ export function SelectiveAttentionGame({ onExit, daily = null }) {
     const results = resultRef.current;
     const outcome = summarise(results);
     setTrial(null);
-    if (daily) {
-      const pointsIn = (level) => results.filter((entry) => entry.level === level).reduce((sum, entry) => sum + entry.points, 0);
-      daily.onFinish({
-        score: outcome.score,
-        metrics: { correct: outcome.correct, trials: outcome.trials, errors: outcome.errors, tooSlow: outcome.tooSlow, meanRtMs: outcome.average, bestRtMs: outcome.best, easyPoints: pointsIn("easy"), mediumPoints: pointsIn("medium"), hardPoints: pointsIn("hard") },
-        trials: results.map((entry) => ({ ok: entry.correct ? 1 : 0, rt: entry.reactionMs, pts: entry.points, level: entry.level, cue: entry.targetType })),
-      });
-      return;
-    }
+    if (daily) { daily.onFinish(dailyResult(results)); return; }
     setSummary(outcome); setPhase("summary");
   }
   // The response time; for a spoken cue, counted from the end of the word rather than from the word on screen.
   function responseTime() {
     const elapsed = Date.now() - startedAt.current;
     if (trial.targetType !== "audio") return elapsed;
-    const allowance = speechStartedAt.current ? speechStartedAt.current - startedAt.current + AUDIO_WORD_MS : AUDIO_FALLBACK_MS;
-    return Math.max(0, elapsed - allowance);
+    return audioResponseTime(elapsed, speechStartedAt.current ? speechStartedAt.current - startedAt.current : null);
   }
   function handleChoice(color) {
     if (phase !== "stimulus" || !trial || !startedAt.current) return;
@@ -191,7 +116,7 @@ export function SelectiveAttentionGame({ onExit, daily = null }) {
   }
 
   const preflight = <GameSetupShell title="Selective Attention" categoryKey="attention" onExit={onExit} onStart={() => startMission(resetToReady)} rules="Tests focus under conflicting cues. Match the requested word, ink colour, or spoken colour. A right answer scores up to 100 points, fewer the slower the response (for a spoken cue, the time to hear the word is not counted); a wrong answer, or none within 6 seconds, scores 0.Easy: The cue is shown before each word.Medium: Audio is added to the possible cues.Hard: The cue is revealed with the word.">
-    <PickerSetting label="Difficulty" options={difficultyOptions.map((option) => ({ value: option, label: option.label }))} value={difficulty} onChange={setDifficulty} />
+    <PickerSetting label="Difficulty" options={DIFFICULTY_OPTIONS.map((option) => ({ value: option, label: option.label }))} value={difficulty} onChange={setDifficulty} />
     <PickerSetting label="Trials" options={[3, 6, 10].map((value) => ({ value, label: String(value) }))} value={roundCount} onChange={setRoundCount} />
   </GameSetupShell>;
 

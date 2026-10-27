@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { cancelAnimation, Easing, runOnJS, useAnimatedStyle, useSharedValue, withSpring, withTiming } from "react-native-reanimated";
-import Svg, { Circle, Line } from "react-native-svg";
 
-import { acceptedRange, buildProblem, EXERCISE_TYPES } from "../../games/estimation/EstimationGame";
+import { AngleFigure } from "../../games/estimation/AngleFigure";
+import { acceptedRange, buildProblem, EXERCISE_TYPES } from "../../games/estimation/logic";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
 import { createRandom, randomTools } from "../../utils/random";
@@ -36,14 +36,6 @@ const format = (value) => Math.round(value).toLocaleString("en-US");
 
 function Dots({ points }) {
   return <View style={styles.dotBoard}>{points.map((point, index) => <View key={index} style={[styles.dot, { left: `${point.x}%`, top: `${point.y}%`, backgroundColor: point.blue ? SPACE_CADET.spatial : SPACE_CADET.white }]} />)}</View>;
-}
-function Angle({ angle, size }) {
-  const center = size * 0.42; const base = size * 0.78; const length = size * 0.58; const radians = (angle * Math.PI) / 180;
-  return <Svg width={size} height={size * 0.86}>
-    <Line x1={center} y1={base} x2={center} y2={base - length} stroke={SPACE_CADET.white} strokeWidth={3} strokeLinecap="round" />
-    <Line x1={center} y1={base} x2={center + Math.sin(radians) * length} y2={base - Math.cos(radians) * length} stroke={SPACE_CADET.white} strokeWidth={3} strokeLinecap="round" />
-    <Circle cx={center} cy={base} r={3.5} fill={SPACE_CADET.mentalMath} />
-  </Svg>;
 }
 
 // Spring-loaded like the Full Clearance slider: the further it is pushed, the faster the value runs; it springs
@@ -172,7 +164,7 @@ export function EstimationModule({ rects, runtime, color }) {
   let body = <Text style={styles.idle}>STAND BY</Text>;
   if (current) {
     if (current.type === "points") body = <><Dots points={current.points} /><Text style={styles.question}>{current.prompt}</Text></>;
-    else if (current.type === "angle") body = <><Angle angle={current.angle} size={Math.min(card.width - 40, card.height - 90)} /><Text style={styles.question}>{current.prompt}</Text></>;
+    else if (current.type === "angle") body = <><AngleFigure angle={current.angle} rotation={current.rotation} size={Math.min(card.width - 40, card.height - 90)} stroke={3} /><Text style={styles.question}>{current.prompt}</Text></>;
     else if (compare) body = <><Text style={styles.question}>{current.prompt}</Text><View style={styles.compareRow}>
       {current.compareLabels.map((label, index) => {
         const side = index === 0 ? -1 : 1;

@@ -4,7 +4,7 @@ import Animated, { Easing, useAnimatedStyle, useSharedValue, withSequence, withT
 import Svg, { Circle, Path, Polygon, Polyline } from "react-native-svg";
 
 import { NetView } from "../../games/cube-nets/CubeNetsGame";
-import { GLYPHS, oppositeAppearance, oppositeCells, randomShape } from "../../games/cube-nets/cubeNets";
+import { GLYPHS, oppositeAppearance, oppositeCells, randomShape } from "../../games/cube-nets/logic";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerImpactHaptic, triggerSuccessHaptic } from "../../utils/haptics";
 import { createRandom, randomTools } from "../../utils/random";

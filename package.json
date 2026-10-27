@@ -7,7 +7,9 @@
     "start": "expo start",
     "ios": "expo start --ios",
     "android": "expo start --android",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "check:separation": "node scripts/check-game-separation.mjs",
+    "test:games": "node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/games/reporter.mjs \"scripts/games/*.test.mjs\""
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",

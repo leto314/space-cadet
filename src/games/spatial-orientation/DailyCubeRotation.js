@@ -4,50 +4,17 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
-import { createRandom, deriveSeed, randomTools } from "../../utils/random";
 import { endVoiceSession, say, startVoiceSession, stopSpeaking } from "../../utils/voice";
+import { CubeNetRenderer } from "./CubeNetRenderer";
 import { CubeRenderer } from "./CubeRenderer";
-import { buildRotationMatrix, CubeNetRenderer, easeInOut, getAnswerLabel, getTrackedFacePosition, getVoiceLabel, identityMatrix, multiplyMatrices, rotateOrientation, snapMatrix } from "./SpatialOrientationGame";
+import { buildDailySet, buildRotationMatrix, dailyResult, DAILY_SETS, DAILY_TURNS, easeInOut, getAnswerLabel, getTrackedFacePosition, getVoiceLabel, identityMatrix, multiplyMatrices, rotateOrientation, snapMatrix, START_ORIENTATION } from "./logic";
 
 const ACCENT = SPACE_CADET.spatial;
-const TURNS = 10;
+const TURNS = DAILY_TURNS;
+const SETS = DAILY_SETS.length;
 const SETTLE_MS = 1500;
 const UNFOLD_MS = 1800;
 const REVEAL_MS = 2000;
-const START_ORIENTATION = { front: "front", back: "back", left: "left", right: "right", top: "top", bottom: "bottom" };
-
-// Five sets of growing difficulty, the same for everyone. "Hidden" turns are announced by the voice but the cube
-// does not move: the player pictures them. (The cube's faces all look alike while it turns, so a skipped
-// animation never shows a wrong state.)
-//   set 1        slow, every turn shown
-//   sets 2–3     quicker; one or two turns (never the first) only announced
-//   sets 4–5     quicker; the first 3 or 4 turns are shown, then the cube stays still until the end of the set
-const SLOW = { rotationMs: 950, pauseMs: 1250 };
-const QUICK = { rotationMs: 800, pauseMs: 950 };
-const hideSome = (rnd) => rnd.shuffle([1, 2, 3, 4, 5, 6, 7, 8, 9]).slice(0, rnd.int(1, 2));
-const hideTail = (rnd) => { const from = rnd.int(3, 4); return Array.from({ length: TURNS - from }, (_, index) => from + index); };
-export const CUBE_SETS = [
-  { ...SLOW, hidden: () => [] },
-  { ...QUICK, hidden: hideSome },
-  { ...QUICK, hidden: hideSome },
-  { ...QUICK, hidden: hideTail },
-  { ...QUICK, hidden: hideTail },
-];
-const SETS = CUBE_SETS.length;
-
-// One set: ten turns (never a turn immediately undone by the next one) and which of them are hidden.
-function buildSet(seed, index) {
-  const rnd = randomTools(createRandom(deriveSeed(seed, `set-${index}`)));
-  const turns = [];
-  for (let turn = 0; turn < TURNS; turn += 1) {
-    let next;
-    do next = { axis: rnd.item(["x", "y", "z"]), direction: rnd.item([1, -1]) };
-    while (turns.length && turns.at(-1).axis === next.axis && turns.at(-1).direction === -next.direction);
-    turns.push(next);
-  }
-  const hidden = CUBE_SETS[index].hidden(rnd);
-  return turns.map((turn, position) => ({ ...turn, hidden: hidden.includes(position) }));
-}
 
 // Daily training version of Cube Rotation: five sets of ten turns from the day's seed, then a score out of
 // 1000 (200 per set found). Calls onFinish({ score, metrics, trials }).
@@ -109,7 +76,7 @@ export function DailyCubeRotation({ seed, onFinish, onExit }) {
     setTurnIndex(0);
     setHiddenNow(false);
     setPhase("settling");
-    const turns = buildSet(seed, index);
+    const turns = buildDailySet(seed, index);
     later(() => { setPhase("running"); runTurn(turns, 0); }, SETTLE_MS);
   }
 
@@ -120,7 +87,7 @@ export function DailyCubeRotation({ seed, onFinish, onExit }) {
       return;
     }
     const turn = turns[index];
-    const config = CUBE_SETS[setIndexRef.current];
+    const config = DAILY_SETS[setIndexRef.current];
     setTurnIndex(index + 1);
     setHiddenNow(turn.hidden);
     void say(getVoiceLabel(turn), { language: "en-US", pitch: 1, rate: 0.92 });
@@ -143,21 +110,15 @@ export function DailyCubeRotation({ seed, onFinish, onExit }) {
     if (phase !== "answer") return;
     const expected = getTrackedFacePosition(orientation.current, "front");
     const ok = choice === expected;
-    const hidden = buildSet(seed, setIndex).filter((turn) => turn.hidden).length;
+    const hidden = buildDailySet(seed, setIndex).filter((turn) => turn.hidden).length;
     trials.current.push({ ok: ok ? 1 : 0, ms: Date.now() - answerStartedAt.current, answer: choice, expected, hidden });
     setResult({ selected: choice, correct: expected, isCorrect: ok });
     setPhase("reveal");
     void (ok ? triggerSuccessHaptic() : triggerErrorHaptic());
     later(() => {
       if (setIndex + 1 < SETS) { startSet(setIndex + 1); return; }
-      const correct = trials.current.filter((trial) => trial.ok).length;
-      const times = trials.current.map((trial) => trial.ms);
       endVoiceSession();
-      onFinish({
-        score: Math.round((correct / SETS) * 1000),
-        metrics: { correct, sets: SETS, turnsPerSet: TURNS, meanAnswerMs: Math.round(times.reduce((sum, value) => sum + value, 0) / times.length), hiddenTurns: trials.current.reduce((sum, trial) => sum + trial.hidden, 0) },
-        trials: trials.current,
-      });
+      onFinish(dailyResult(trials.current));
     }, REVEAL_MS);
   }
 
@@ -174,7 +135,7 @@ export function DailyCubeRotation({ seed, onFinish, onExit }) {
       </View> : null}
     </View>
     <Pressable disabled={phase !== "ready"} onPress={begin} style={styles.body}>
-      <Text style={styles.kicker}>DAILY TRAINING{phase !== "ready" ? ` · ${setIndex === 0 ? "SLOW" : setIndex < 3 ? "SOME TURNS HIDDEN" : "FINISH IN YOUR HEAD"}` : ""}</Text>
+      <Text style={styles.kicker}>DAILY TRAINING{phase !== "ready" ? ` · ${DAILY_SETS[setIndex].label}` : ""}</Text>
       <Text style={styles.title}>{title}</Text>
       <Text style={styles.helper}>{helper}</Text>
       <PulsingPrompt color={ACCENT} style={[styles.prompt, phase !== "ready" && styles.hiddenPrompt]}>{phase === "ready" ? "TAP ANYWHERE TO BEGIN" : " "}</PulsingPrompt>

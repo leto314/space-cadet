@@ -1,13 +1,18 @@
+import { AirwaysGame } from "../games/airways/AirwaysGame";
 import { ContinuousTotalGame } from "../games/continuous-total/ContinuousTotalGame";
 import { CubeNetsGame } from "../games/cube-nets/CubeNetsGame";
 import { EstimationGame } from "../games/estimation/EstimationGame";
+import { MemorySpanGame } from "../games/memory-span/MemorySpanGame";
 import { MentalMathGame } from "../games/mental-math/MentalMathGame";
+import { MultitaskingGame } from "../games/multitasking/MultitaskingGame";
+import { NBackGame } from "../games/n-back/NBackGame";
 import { ReactionTimeGame } from "../games/reaction-time/ReactionTimeGame";
 import { SelectiveAttentionGame } from "../games/selective-attention/SelectiveAttentionGame";
 import { SpatialBeaconGame } from "../games/spatial-beacon/SpatialBeaconGame";
 import { DailyCubeRotation } from "../games/spatial-orientation/DailyCubeRotation";
 import { SymbolRadarGame } from "../games/symbol-radar/SymbolRadarGame";
 import { TurnCountGame } from "../games/turn-count/TurnCountGame";
+import { VisualGridMemoryGame } from "../games/visual-grid-memory/VisualGridMemoryGame";
 import { VisualScanGame } from "../games/visual-scan/VisualScanGame";
 import { createRandom, hashString, randomTools } from "../utils/random";
 
@@ -121,6 +126,51 @@ export const DAILY_GAMES = {
     progression: "Twelve estimates for everyone: every kind once (products, quotients, percentages, sums, comparisons, percent changes, missing values, dot counts, angles) plus three more, in the day's order.",
     rules: "Type your estimate and enter it: up to 100 points each, full within a small band, then falling evenly to 0 at a band set per kind (dots and angles are more forgiving than a sum). Dots are shown for four seconds, then hidden. Fifteen seconds per estimate.",
     Component: ({ seed, onFinish, onExit }) => <EstimationGame daily={{ seed, onFinish, onExit }} />,
+  },
+  multitasking: {
+    competence: "multitasking",
+    title: "Target Drift",
+    summary: "90 seconds, easy to hard",
+    levels: null,
+    progression: "Ninety seconds for everyone, harder every thirty: easy (visible target, gentle drift, six seconds per alert), medium (faster drift, shorter alerts), then hard (no target, rapid drift, three seconds per alert). The questions, the alerts and the drift come from the day's seed.",
+    rules: "Three things at once: keep the marker centred with the drift control, answer the two prompts (tap RIGHT when the calculation is correct, or when a character appears twice in the sequence), and tap each alert before it times out. Ninety seconds, harder every thirty. Drift control is worth 400 points (full credit while the marker sits in the target ring, none past the outer ring), decisions 350 (right answers minus wrong ones, against an expected pace of about sixteen a minute), alerts 250 (the share handled in time).",
+    Component: ({ seed, onFinish, onExit }) => <MultitaskingGame daily={{ seed, onFinish, onExit }} />,
+  },
+  "memory-span": {
+    competence: "memory",
+    title: "Memory Sequences",
+    summary: "9 sequences, 4 to 9 long",
+    levels: null,
+    progression: "Nine sequences for everyone, longer and harder as they go: two with the digits on screen and the recall direction known in advance (4 then 5), three with the digits on screen but the direction revealed only at recall (5, 6, 7), then four spoken only, NATO letters among the digits (6, 7, 8, 9).",
+    rules: "Memorize the sequence, then type it back in the requested direction (forward, or in reverse). Nine sequences, harder as you go: the digits stop being shown, and letters join in. Each sequence is worth an equal share of the 1000 points when it comes back exactly right, and half credit for the characters in the right place otherwise.",
+    Component: ({ seed, onFinish, onExit }) => <MemorySpanGame daily={{ seed, onFinish, onExit }} />,
+  },
+  "n-back": {
+    competence: "memory",
+    title: "N-back",
+    summary: "3 blocks, 2-back then harder",
+    levels: null,
+    progression: "Three blocks for everyone: the spoken characters in 2-back (20 trials), the lit square's position in 2-back (25 trials), then the day's hard block of 25 trials: both streams at once in 2-back, or a single stream in 3-back, depending on the day.",
+    rules: "Mark a match when the item repeats the one from N steps earlier. Three blocks: characters (spoken) in 2-back, positions (the lit square) in 2-back, then the day's hard block: both at once with one control each, or one stream in 3-back. A block scores its share of the matches caught minus the share of false alarms, so tapping everything earns nothing: 300 points for the characters, 300 for the positions, 400 for the hard block.",
+    Component: ({ seed, onFinish, onExit }) => <NBackGame daily={{ seed, onFinish, onExit }} />,
+  },
+  "visual-grid-memory": {
+    competence: "memory",
+    title: "Visual Memory",
+    summary: "3 ladders, 3 cells up",
+    levels: null,
+    progression: "Three ladders for everyone, each starting at three cells and gaining one cell per success until a mistake: a plain 4 × 4 grid, then a 5 × 5 grid recalled in order or seen through decoy patterns (depending on the day), then a 5 × 5 grid that turns a quarter before recall or a 6 × 6 grid recalled in order (depending on the day).",
+    rules: "Memorize the highlighted cells, then find them again on the empty grid. Each ladder starts at three cells and adds one at every success; the first mistake ends it. A ladder is worth about a third of the points, in full at eight cells on the plain grid, seven through decoys or when the grid turns, six when the order matters.",
+    Component: ({ seed, onFinish, onExit }) => <VisualGridMemoryGame daily={{ seed, onFinish, onExit }} />,
+  },
+  airways: {
+    competence: "multitasking",
+    title: "Airways",
+    summary: "90 seconds, slow to fast",
+    levels: null,
+    progression: "Ninety seconds for everyone, the traffic speeding up every thirty: slow, medium, then fast. The traffic comes from the day's seed.",
+    rules: "Keep the shaded sectors from saturating: a sector may hold at most four aircraft, including at most two blue ones. Clear a lane with its button, or every aircraft of a colour with the wide buttons. Ninety seconds, faster every thirty. An overload does not end the session: the sector is emptied and the traffic resumes. Safety is worth 600 points (200 lost per overload), efficiency 400 (each reroute made while the sector was not under threat, fewer than three aircraft in its zone and none about to overload it, costs a twelfth; efficiency counts once you have made a needed reroute).",
+    Component: ({ seed, onFinish, onExit }) => <AirwaysGame daily={{ seed, onFinish, onExit }} />,
   },
 };
 

@@ -7,30 +7,13 @@ import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
+import { randomSeed } from "../../utils/random";
+import { buildDailyLadders, buildRound, DAILY_START_TARGETS, dailyResult, DISTRACTION_BLANK_MS, DISTRACTION_FLASH_MS, maxTargetsForGrid } from "./logic";
 
 const ACCENT = SPACE_CADET.memory;
 const SUCCESS = "#34D399";
 const ERROR = SPACE_CADET.attention;
 const GRID_GAP = 8;
-const DISTRACTION_BLANK_MS = 600;
-const DISTRACTION_FLASH_MS = 460;
-
-function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-function shuffledIndices(count) {
-  const indices = Array.from({ length: count }, (_, index) => index);
-  for (let index = indices.length - 1; index > 0; index -= 1) {
-    const swapIndex = randomInt(0, index);
-    [indices[index], indices[swapIndex]] = [indices[swapIndex], indices[index]];
-  }
-  return indices;
-}
-function buildTargets(cellCount, targetCount, excludedSignature = null) {
-  let targets = shuffledIndices(cellCount).slice(0, targetCount);
-  while (excludedSignature && targets.join(",") === excludedSignature) targets = shuffledIndices(cellCount).slice(0, targetCount);
-  return targets;
-}
-function maxTargetsForGrid(size) { return size === 4 ? 10 : 12; }
-
 function RotationArrow({ clockwise }) {
   return <Image source={require("./arrow_rot.png")} resizeMode="contain" style={[styles.rotationIcon, !clockwise && styles.rotationIconReverse]} />;
 }
@@ -53,14 +36,18 @@ function MemoryGrid({ size, activeCells = [], selectedCells = [], targets = [], 
   </View></View>;
 }
 
-export function VisualGridMemoryGame({ onExit }) {
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's three
+// ladders (a plain 4 x 4, then two harder ones drawn from the seed), each climbing from three cells until a
+// mistake, then onFinish({ score, metrics, trials }).
+export function VisualGridMemoryGame({ onExit, daily = null }) {
   const [gridSize, setGridSize] = useState(4);
   const [displaySeconds, setDisplaySeconds] = useState(3);
   const [rotateBeforeRecall, setRotateBeforeRecall] = useState(false);
   const [orderedRecall, setOrderedRecall] = useState(false);
   const [distraction, setDistraction] = useState(false);
-  const [phase, setPhase] = useState("preflight");
-  const [roundTargets, setRoundTargets] = useState(1);
+  const [phase, setPhase] = useState(daily ? "ready" : "preflight");
+  const [ladderIndex, setLadderIndex] = useState(0);
+  const [roundTargets, setRoundTargets] = useState(daily ? DAILY_START_TARGETS : 1);
   const [targets, setTargets] = useState([]);
   const [decoyTargets, setDecoyTargets] = useState([]);
   const [selectedCells, setSelectedCells] = useState([]);
@@ -72,42 +59,66 @@ export function VisualGridMemoryGame({ onExit }) {
   const timeoutsRef = useRef([]);
   const intervalRef = useRef(null);
   const targetsRef = useRef([]);
-  const settingsRef = useRef(null);
-  const phaseRef = useRef("preflight");
+  const laddersRef = useRef(daily ? buildDailyLadders(daily.seed) : []);
+  const settingsRef = useRef(daily ? laddersRef.current[0] : null);
+  const phaseRef = useRef(daily ? "ready" : "preflight");
+  const spansRef = useRef([]);
+  const rotationRef = useRef(0);
+  const framesRef = useRef(null);
   const { isReturning, missionStyle, preflightStyle, startMission, returnToPreflight } = useMissionTransition({ onPrepareReturn: clearTimers, onReturnComplete: resetToPreflight });
+
+  const ladder = daily ? laddersRef.current[ladderIndex] : null;
 
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   useEffect(() => () => clearTimers(), []);
   function clearTimers() { clearInterval(intervalRef.current); intervalRef.current = null; timeoutsRef.current.forEach(clearTimeout); timeoutsRef.current = []; }
   function queue(callback, delay) { const timeoutId = setTimeout(callback, delay); timeoutsRef.current.push(timeoutId); }
-  function getAnswerRotation() { return settingsRef.current?.rotateBeforeRecall ? (Math.random() < 0.5 ? -90 : 90) : 0; }
   function resetToPreflight() { clearTimers(); setTargets([]); setDecoyTargets([]); setSelectedCells([]); setFeedback(null); setGridRotation(0); setHighestSuccessful(0); setPhase("preflight"); }
-  function resetToReady() { clearTimers(); setTargets([]); setDecoyTargets([]); setSelectedCells([]); setFeedback(null); setGridRotation(0); setHighestSuccessful(0); setReadyPreviewCell(randomInt(0, gridSize * gridSize - 1)); setPhase("ready"); }
+  function resetToReady() { clearTimers(); setTargets([]); setDecoyTargets([]); setSelectedCells([]); setFeedback(null); setGridRotation(0); setHighestSuccessful(0); setReadyPreviewCell(buildRound({ gridSize, targetCount: 1, rotateBeforeRecall: false }, randomSeed()).targets[0]); setPhase("ready"); }
   function prepareRun() { void triggerSelectionHaptic(); startMission(resetToReady); }
-  function beginAnswer() { clearInterval(intervalRef.current); intervalRef.current = null; setDisplayRemaining(0); setDecoyTargets([]); setGridRotation(getAnswerRotation()); setPhase("answer"); }
+  function beginAnswer() { clearInterval(intervalRef.current); intervalRef.current = null; setDisplayRemaining(0); setDecoyTargets([]); setGridRotation(rotationRef.current); setPhase("answer"); }
   function runDistraction() {
-    const cellCount = settingsRef.current.gridSize ** 2;
-    const signature = targetsRef.current.join(",");
-    const frames = [buildTargets(cellCount, targetsRef.current.length, signature), buildTargets(cellCount, targetsRef.current.length, signature), buildTargets(cellCount, targetsRef.current.length, signature)];
+    const frames = framesRef.current;
     setPhase("distraction-blank");
     queue(() => { setPhase("distraction-flash"); setDecoyTargets(frames[0]); queue(() => { setDecoyTargets(frames[1]); queue(() => { setDecoyTargets(frames[2]); queue(beginAnswer, DISTRACTION_FLASH_MS); }, DISTRACTION_FLASH_MS); }, DISTRACTION_FLASH_MS); }, DISTRACTION_BLANK_MS);
   }
   function beginMemorize(targetCount) {
-    const { gridSize: size, displaySeconds: duration, distraction: distractionEnabled } = settingsRef.current;
-    const nextTargets = buildTargets(size * size, targetCount);
-    clearTimers(); targetsRef.current = nextTargets; setTargets(nextTargets); setDecoyTargets([]); setSelectedCells([]); setRoundTargets(targetCount); setGridRotation(0); setFeedback(null); setDisplayRemaining(duration); setPhase("memorize");
+    const settings = settingsRef.current;
+    const round = daily
+      ? laddersRef.current[ladderIndex].rounds[targetCount - DAILY_START_TARGETS]
+      : buildRound({ gridSize: settings.gridSize, targetCount, rotateBeforeRecall: settings.rotateBeforeRecall, distraction: settings.distraction }, randomSeed());
+    clearTimers(); targetsRef.current = round.targets; rotationRef.current = round.rotation; framesRef.current = round.frames; setTargets(round.targets); setDecoyTargets([]); setSelectedCells([]); setRoundTargets(targetCount); setGridRotation(0); setFeedback(null); setDisplayRemaining(settings.displaySeconds); setPhase("memorize");
     intervalRef.current = setInterval(() => setDisplayRemaining((current) => Math.max(0, current - 1)), 1000);
-    queue(() => distractionEnabled ? runDistraction() : beginAnswer(), duration * 1000);
+    queue(() => settings.distraction ? runDistraction() : beginAnswer(), settings.displaySeconds * 1000);
   }
-  function beginRun() { void triggerSelectionHaptic(); settingsRef.current = { gridSize, displaySeconds, rotateBeforeRecall, orderedRecall, distraction }; setHighestSuccessful(0); beginMemorize(1); }
-  function endRun() { clearTimers(); setPhase("summary"); }
-  function markFailure(index) { void triggerErrorHaptic(); setSelectedCells((current) => [...current, index]); setFeedback("error"); queue(endRun, 900); }
-  function markSuccess() { void triggerSuccessHaptic(); setFeedback("success"); setHighestSuccessful(roundTargets); queue(() => { const maximum = maxTargetsForGrid(settingsRef.current.gridSize); if (roundTargets >= maximum) endRun(); else beginMemorize(roundTargets + 1); }, 560); }
+  function beginRun() {
+    void triggerSelectionHaptic();
+    settingsRef.current = daily ? laddersRef.current[ladderIndex] : { gridSize, displaySeconds, rotateBeforeRecall, orderedRecall, distraction };
+    setHighestSuccessful(0);
+    beginMemorize(daily ? DAILY_START_TARGETS : 1);
+  }
+  // End of a ladder (a mistake, or the longest pattern recalled): the next ladder, or the day's result.
+  function endLadder(span) {
+    clearTimers();
+    if (!daily) { setPhase("summary"); return; }
+    spansRef.current = [...spansRef.current, { ladder: laddersRef.current[ladderIndex], span }];
+    if (ladderIndex + 1 < laddersRef.current.length) { setLadderIndex(ladderIndex + 1); settingsRef.current = laddersRef.current[ladderIndex + 1]; setTargets([]); setSelectedCells([]); setFeedback(null); setGridRotation(0); setHighestSuccessful(0); setPhase("ready"); return; }
+    daily.onFinish(dailyResult(spansRef.current));
+  }
+  function markFailure(index) { void triggerErrorHaptic(); setSelectedCells((current) => [...current, index]); setFeedback("error"); queue(() => endLadder(highestSuccessful), 900); }
+  function markSuccess() {
+    void triggerSuccessHaptic(); setFeedback("success"); setHighestSuccessful(roundTargets);
+    queue(() => {
+      const maximum = daily ? DAILY_START_TARGETS + laddersRef.current[ladderIndex].rounds.length - 1 : maxTargetsForGrid(settingsRef.current.gridSize);
+      if (roundTargets >= maximum) endLadder(roundTargets);
+      else beginMemorize(roundTargets + 1);
+    }, 560);
+  }
   function handleAnswerSelection(index, earlyStart = false) {
     if (phaseRef.current === "memorize" && earlyStart) {
       const expectedFirst = settingsRef.current.orderedRecall ? targetsRef.current[0] : null;
       if (settingsRef.current.orderedRecall ? index !== expectedFirst : !targetsRef.current.includes(index)) return;
-      clearTimers(); setSelectedCells([index]); setGridRotation(getAnswerRotation()); setPhase("answer");
+      clearTimers(); setSelectedCells([index]); setGridRotation(rotationRef.current); setPhase("answer");
       if (targetsRef.current.length === 1) markSuccess(); else void triggerSelectionHaptic();
       return;
     }
@@ -126,10 +137,10 @@ export function VisualGridMemoryGame({ onExit }) {
 
   return <View style={styles.container}>
     {phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}
-    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, missionStyle]}>
-      <View style={styles.header}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
-      {phase === "ready" ? <Pressable onPress={beginRun} style={styles.readyScreen}><Text style={styles.kicker}>VISUAL MEMORY</Text><Text style={styles.readyTitle}>Ready to map the pattern?</Text><Text style={styles.readyText}>The highlighted cells will disappear. Find them again from memory.</Text><PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt><MemoryGrid size={gridSize} activeCells={[readyPreviewCell]} preview disabled stageStyle={styles.fixedGridStage} /></Pressable> : null}
-      {["memorize", "distraction-blank", "distraction-flash", "answer"].includes(phase) ? <Animated.View entering={FadeIn.duration(170)} style={styles.playScreen}><Text style={styles.phaseText}>{phaseCopy}</Text>{phase === "memorize" ? <Text style={styles.countdown}>{displayRemaining}</Text> : null}{phase === "answer" && gridRotation ? <View style={styles.rotationCue}><Text style={styles.rotationNote}>GRID ROTATED 90° {gridRotation === 90 ? "CLOCKWISE" : "COUNTERCLOCKWISE"}</Text><RotationArrow clockwise={gridRotation === 90} /></View> : null}<MemoryGrid size={settingsRef.current?.gridSize ?? gridSize} activeCells={displayedTargets} selectedCells={selectedCells} targets={targets} ordered={settingsRef.current?.orderedRecall} rotation={gridRotation} feedback={feedback} disabled={phase !== "answer" && !earlyStart} onSelect={(index) => handleAnswerSelection(index, earlyStart)} stageStyle={styles.fixedGridStage} /></Animated.View> : null}
+    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, !daily && missionStyle]}>
+      <View style={styles.header}><Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
+      {phase === "ready" ? <Pressable onPress={beginRun} style={styles.readyScreen}><Text style={styles.kicker}>{daily ? `DAILY TRAINING · LADDER ${ladderIndex + 1} / ${laddersRef.current.length} · ${ladder.label}` : "VISUAL MEMORY"}</Text><Text style={styles.readyTitle}>Ready to map the pattern?</Text><Text style={styles.readyText}>{daily ? `${ladder.gridSize} × ${ladder.gridSize} grid, from ${DAILY_START_TARGETS} cells up: one more cell each time you get it right, until a mistake.${ladder.rotateBeforeRecall ? " The grid turns a quarter before recall." : ladder.orderedRecall ? " Recall the cells in their original order." : ladder.distraction ? " Decoy patterns flash before recall: ignore them." : ""}` : "The highlighted cells will disappear. Find them again from memory."}</Text><PulsingPrompt color={ACCENT} style={styles.beginPrompt}>TAP ANYWHERE TO BEGIN</PulsingPrompt><MemoryGrid size={daily ? ladder.gridSize : gridSize} activeCells={[readyPreviewCell]} preview disabled stageStyle={styles.fixedGridStage} /></Pressable> : null}
+      {["memorize", "distraction-blank", "distraction-flash", "answer"].includes(phase) ? <Animated.View entering={FadeIn.duration(170)} style={styles.playScreen}><Text style={styles.phaseText}>{phaseCopy}</Text>{phase === "memorize" ? <Text style={styles.countdown}>{displayRemaining}</Text> : null}{daily ? <Text style={styles.rotationNote}>LADDER {ladderIndex + 1} / {laddersRef.current.length} · {roundTargets} CELLS</Text> : null}{phase === "answer" && gridRotation ? <View style={styles.rotationCue}><Text style={styles.rotationNote}>GRID ROTATED 90° {gridRotation === 90 ? "CLOCKWISE" : "COUNTERCLOCKWISE"}</Text><RotationArrow clockwise={gridRotation === 90} /></View> : null}<MemoryGrid size={settingsRef.current?.gridSize ?? gridSize} activeCells={displayedTargets} selectedCells={selectedCells} targets={targets} ordered={settingsRef.current?.orderedRecall} rotation={gridRotation} feedback={feedback} disabled={phase !== "answer" && !earlyStart} onSelect={(index) => handleAnswerSelection(index, earlyStart)} stageStyle={styles.fixedGridStage} /></Animated.View> : null}
       {phase === "summary" ? <Animated.View entering={FadeIn.duration(180)} style={styles.summaryScreen}><Text style={styles.kicker}>SESSION ENDED</Text><Text style={styles.summaryTitle}>Pattern complete</Text><Text style={styles.summaryScore}>{highestSuccessful}</Text><Text style={styles.summaryCaption}>cells recalled in your best round</Text><View style={styles.statCard}><Text style={styles.statLabel}>BEST ROUND</Text><Text style={styles.statValue}>{highestSuccessful} / {maxTargetsForGrid(settingsRef.current?.gridSize ?? gridSize)}</Text><Text style={styles.statLine}>Final round <Text style={styles.statStrong}>{roundTargets} cells</Text></Text></View><View style={styles.actions}><TouchableOpacity activeOpacity={0.88} onPress={resetToReady} style={styles.primaryButton}><Text style={styles.primaryText}>Play again</Text></TouchableOpacity><TouchableOpacity activeOpacity={0.88} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryText}>Change settings</Text></TouchableOpacity></View></Animated.View> : null}
     </Animated.View> : null}
   </View>;

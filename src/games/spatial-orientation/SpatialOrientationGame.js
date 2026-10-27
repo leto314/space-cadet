@@ -4,384 +4,20 @@ import Svg, { Polygon } from "react-native-svg";
 import Animated, { Easing, runOnJS, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 
 import { CubeRenderer } from "./CubeRenderer";
+import { CubeNetRenderer } from "./CubeNetRenderer";
+import { buildRotationMatrix, buildRun, DIFFICULTY_OPTIONS, easeInOut, getAnswerLabel, getTrackedFacePosition, getVoiceLabel, identityMatrix, multiplyMatrices, rotateOrientation, snapMatrix, START_ORIENTATION } from "./logic";
 import { endVoiceSession, say, startVoiceSession, stopSpeaking } from "../../utils/voice";
 import { triggerSelectionHaptic } from "../../utils/haptics";
 import { GameSetupShell, PickerSetting } from "../../components/GameSetupShell";
 import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { SPACE_CADET } from "../../theme/spaceCadet";
-
-const difficultyOptions = [
-  { key: "easy", label: "Easy", rotationMs: 1100, pauseMs: 1500, visual: true },
-  { key: "medium", label: "Medium", rotationMs: 660, pauseMs: 780, visual: true },
-  { key: "hard", label: "Hard", rotationMs: 760, pauseMs: 900, visual: false },
-];
-
-export const identityMatrix = [
-  [1, 0, 0],
-  [0, 1, 0],
-  [0, 0, 1],
-];
-
-const answerLabels = {
-  top: "top",
-  left: "left",
-  front: "front",
-  right: "right",
-  bottom: "bottom",
-  back: "back",
-};
-
-export function easeInOut(progress) {
-  return 0.5 - Math.cos(Math.PI * progress) / 2;
-}
-
-function degreesToRadians(value) {
-  return (value * Math.PI) / 180;
-}
-
-export function multiplyMatrices(left, right) {
-  return [
-    [
-      left[0][0] * right[0][0] + left[0][1] * right[1][0] + left[0][2] * right[2][0],
-      left[0][0] * right[0][1] + left[0][1] * right[1][1] + left[0][2] * right[2][1],
-      left[0][0] * right[0][2] + left[0][1] * right[1][2] + left[0][2] * right[2][2],
-    ],
-    [
-      left[1][0] * right[0][0] + left[1][1] * right[1][0] + left[1][2] * right[2][0],
-      left[1][0] * right[0][1] + left[1][1] * right[1][1] + left[1][2] * right[2][1],
-      left[1][0] * right[0][2] + left[1][1] * right[1][2] + left[1][2] * right[2][2],
-    ],
-    [
-      left[2][0] * right[0][0] + left[2][1] * right[1][0] + left[2][2] * right[2][0],
-      left[2][0] * right[0][1] + left[2][1] * right[1][1] + left[2][2] * right[2][1],
-      left[2][0] * right[0][2] + left[2][1] * right[1][2] + left[2][2] * right[2][2],
-    ],
-  ];
-}
-
-export function buildRotationMatrix(axis, degrees) {
-  const radians = degreesToRadians(degrees);
-  const cos = Math.cos(radians);
-  const sin = Math.sin(radians);
-
-  if (axis === "x") {
-    return [
-      [1, 0, 0],
-      [0, cos, -sin],
-      [0, sin, cos],
-    ];
-  }
-
-  if (axis === "y") {
-    return [
-      [cos, 0, sin],
-      [0, 1, 0],
-      [-sin, 0, cos],
-    ];
-  }
-
-  return [
-    [cos, -sin, 0],
-    [sin, cos, 0],
-    [0, 0, 1],
-  ];
-}
-
-function snapValue(value) {
-  if (Math.abs(value) < 0.0001) {
-    return 0;
-  }
-
-  if (Math.abs(value - 1) < 0.0001) {
-    return 1;
-  }
-
-  if (Math.abs(value + 1) < 0.0001) {
-    return -1;
-  }
-
-  return value;
-}
-
-export function snapMatrix(matrix) {
-  return matrix.map((row) => row.map((value) => snapValue(value)));
-}
-
-function buildRandomSequence(turns) {
-  const axes = ["x", "y", "z"];
-  const sequence = [];
-  let previous = null;
-
-  for (let index = 0; index < turns; index += 1) {
-    let next = null;
-
-    while (!next || (previous && previous.axis === next.axis && previous.direction === -next.direction)) {
-      next = {
-        axis: axes[Math.floor(Math.random() * axes.length)],
-        direction: Math.random() > 0.5 ? 1 : -1,
-      };
-    }
-
-    sequence.push(next);
-    previous = next;
-  }
-
-  return sequence;
-}
-
-export function rotateOrientation(orientation, axis, direction) {
-  if (axis === "y") {
-    if (direction === 1) {
-      return {
-        front: orientation.left,
-        right: orientation.front,
-        back: orientation.right,
-        left: orientation.back,
-        top: orientation.top,
-        bottom: orientation.bottom,
-      };
-    }
-
-    return {
-      front: orientation.right,
-      right: orientation.back,
-      back: orientation.left,
-      left: orientation.front,
-      top: orientation.top,
-      bottom: orientation.bottom,
-    };
-  }
-
-  if (axis === "z") {
-    if (direction === 1) {
-      return {
-        front: orientation.front,
-        back: orientation.back,
-        top: orientation.right,
-        left: orientation.top,
-        bottom: orientation.left,
-        right: orientation.bottom,
-      };
-    }
-
-    return {
-      front: orientation.front,
-      back: orientation.back,
-      top: orientation.left,
-      left: orientation.bottom,
-      bottom: orientation.right,
-      right: orientation.top,
-    };
-  }
-
-  if (direction === 1) {
-    return {
-      front: orientation.top,
-      top: orientation.back,
-      back: orientation.bottom,
-      bottom: orientation.front,
-      left: orientation.left,
-      right: orientation.right,
-    };
-  }
-
-  return {
-    front: orientation.bottom,
-    top: orientation.front,
-    back: orientation.top,
-    bottom: orientation.back,
-    left: orientation.left,
-    right: orientation.right,
-  };
-}
-
-export function getTrackedFacePosition(orientation, trackedFace) {
-  return Object.keys(orientation).find((position) => orientation[position] === trackedFace);
-}
-
-export function getAnswerLabel(answerKey) {
-  return answerLabels[answerKey] ?? answerKey;
-}
-
-export function getVoiceLabel(turn) {
-  if (turn.axis === "y") {
-    return turn.direction === 1 ? "right" : "left";
-  }
-
-  if (turn.axis === "x") {
-    return turn.direction === 1 ? "down" : "up";
-  }
-
-  return turn.direction === 1 ? "counterclockwise" : "clockwise";
-}
-
-function clamp(value, minimum, maximum) {
-  return Math.min(Math.max(value, minimum), maximum);
-}
-
-function pointsToString(points) {
-  return points.map((point) => `${point.x},${point.y}`).join(" ");
-}
-
-function buildFrontSquare(size, centerX, centerY) {
-  return {
-    topLeft: { x: centerX - size / 2, y: centerY - size / 2 },
-    topRight: { x: centerX + size / 2, y: centerY - size / 2 },
-    bottomRight: { x: centerX + size / 2, y: centerY + size / 2 },
-    bottomLeft: { x: centerX - size / 2, y: centerY + size / 2 },
-  };
-}
-
-function interpolatePoint(start, end, progress) {
-  return {
-    x: start.x + (end.x - start.x) * progress,
-    y: start.y + (end.y - start.y) * progress,
-  };
-}
-
-function buildNetPolygon(faceKey, frontSquare, size, sideProgress, topProgress, backProgress) {
-  const topOuterLeft = { x: frontSquare.topLeft.x, y: frontSquare.topLeft.y - size * topProgress };
-  const topOuterRight = { x: frontSquare.topRight.x, y: frontSquare.topRight.y - size * topProgress };
-  const bottomOuterLeft = { x: frontSquare.bottomLeft.x, y: frontSquare.bottomLeft.y + size * sideProgress };
-  const bottomOuterRight = { x: frontSquare.bottomRight.x, y: frontSquare.bottomRight.y + size * sideProgress };
-  const leftOuterTop = { x: frontSquare.topLeft.x - size * sideProgress, y: frontSquare.topLeft.y };
-  const leftOuterBottom = { x: frontSquare.bottomLeft.x - size * sideProgress, y: frontSquare.bottomLeft.y };
-  const rightOuterTop = { x: frontSquare.topRight.x + size * sideProgress, y: frontSquare.topRight.y };
-  const rightOuterBottom = { x: frontSquare.bottomRight.x + size * sideProgress, y: frontSquare.bottomRight.y };
-
-  if (faceKey === "front") {
-    return [
-      frontSquare.topLeft,
-      frontSquare.topRight,
-      frontSquare.bottomRight,
-      frontSquare.bottomLeft,
-    ];
-  }
-
-  if (faceKey === "top") {
-    return [topOuterLeft, topOuterRight, frontSquare.topRight, frontSquare.topLeft];
-  }
-
-  if (faceKey === "bottom") {
-    return [frontSquare.bottomLeft, frontSquare.bottomRight, bottomOuterRight, bottomOuterLeft];
-  }
-
-  if (faceKey === "left") {
-    return [leftOuterTop, frontSquare.topLeft, frontSquare.bottomLeft, leftOuterBottom];
-  }
-
-  if (faceKey === "right") {
-    return [frontSquare.topRight, rightOuterTop, rightOuterBottom, frontSquare.bottomRight];
-  }
-
-  const backTopLeft = interpolatePoint(topOuterLeft, { x: topOuterLeft.x, y: topOuterLeft.y - size }, backProgress);
-  const backTopRight = interpolatePoint(
-    topOuterRight,
-    { x: topOuterRight.x, y: topOuterRight.y - size },
-    backProgress
-  );
-
-  return [backTopLeft, backTopRight, topOuterRight, topOuterLeft];
-}
-
-function getNetFill(faceKey, result) {
-  if (!result) {
-    return SPACE_CADET.surface2;
-  }
-
-  if (result.correct === faceKey) {
-    return "#123329";
-  }
-
-  if (result.selected === faceKey && result.selected !== result.correct) {
-    return "#3A1720";
-  }
-
-  return SPACE_CADET.surface2;
-}
-
-function mixHexColor(start, end, progress) {
-  const ratio = clamp(progress, 0, 1);
-  const channels = [0, 2, 4].map((offset) => {
-    const from = parseInt(start.slice(offset + 1, offset + 3), 16);
-    const to = parseInt(end.slice(offset + 1, offset + 3), 16);
-    return Math.round(from + (to - from) * ratio)
-      .toString(16)
-      .padStart(2, "0");
-  });
-
-  return `#${channels.join("")}`;
-}
-
-function getNetBaseStroke(progress) {
-  return mixHexColor(SPACE_CADET.spatial, "#626978", progress / 0.76);
-}
-
-export function CubeNetRenderer({ progress, onSelect, disabled, result }) {
-  const viewportWidth = 280;
-  const viewportHeight = 360;
-  const finalSize = 68;
-  const startSize = 156;
-  const zoomProgress = clamp(progress / 0.28, 0, 1);
-  const sideProgress = clamp((progress - 0.28) / 0.3, 0, 1);
-  const topProgress = clamp((progress - 0.58) / 0.18, 0, 1);
-  const backProgress = clamp((progress - 0.76) / 0.24, 0, 1);
-  const size = startSize + (finalSize - startSize) * zoomProgress;
-  const centerX = viewportWidth / 2;
-  const centerY = 180 + 10 * zoomProgress;
-  const frontSquare = buildFrontSquare(size, centerX, centerY);
-  const faces = ["back", "top", "left", "front", "right", "bottom"];
-  const getFacePoints = (face) =>
-    pointsToString(buildNetPolygon(face, frontSquare, size, sideProgress, topProgress, backProgress));
-  const highlightedFaces = result
-    ? [
-        { key: result.correct, color: "#34D399" },
-        ...(result.selected !== result.correct ? [{ key: result.selected, color: "#D64045" }] : []),
-      ]
-    : [];
-
-  return (
-    <View style={styles.netWrapper}>
-      <Svg width={viewportWidth} height={viewportHeight} viewBox={`0 0 ${viewportWidth} ${viewportHeight}`}>
-        {faces.map((face) => (
-          <Polygon
-            key={face}
-            points={getFacePoints(face)}
-            fill={getNetFill(face, result)}
-            stroke={getNetBaseStroke(progress)}
-            strokeWidth="2"
-            strokeLinejoin="round"
-            onPress={!disabled ? () => onSelect(face) : undefined}
-          />
-        ))}
-        {highlightedFaces.map((face) => (
-          <Polygon
-            key={`${face.key}-result-outline`}
-            points={getFacePoints(face.key)}
-            fill="none"
-            stroke={face.color}
-            strokeWidth="3.5"
-            strokeLinejoin="round"
-            pointerEvents="none"
-          />
-        ))}
-      </Svg>
-    </View>
-  );
-}
+import { randomSeed } from "../../utils/random";
 
 export function SpatialOrientationGame({ onExit }) {
-  const [selectedDifficulty, setSelectedDifficulty] = useState(difficultyOptions[0]);
+  const [selectedDifficulty, setSelectedDifficulty] = useState(DIFFICULTY_OPTIONS[0]);
   const [moveCount, setMoveCount] = useState(7);
   const [phase, setPhase] = useState("difficulty");
-  const [orientation, setOrientation] = useState({
-    front: "front",
-    back: "back",
-    left: "left",
-    right: "right",
-    top: "top",
-    bottom: "bottom",
-  });
+  const [orientation, setOrientation] = useState(START_ORIENTATION);
   const [cubeMatrix, setCubeMatrix] = useState(identityMatrix);
   const [pulseLevel, setPulseLevel] = useState(0);
   const [unfoldProgress, setUnfoldProgress] = useState(0);
@@ -496,14 +132,7 @@ export function SpatialOrientationGame({ onExit }) {
     matrixRef.current = identityMatrix;
     setCubeMatrix(identityMatrix);
     setSelectedDifficulty(nextDifficulty);
-    setOrientation({
-      front: "front",
-      back: "back",
-      left: "left",
-      right: "right",
-      top: "top",
-      bottom: "bottom",
-    });
+    setOrientation(START_ORIENTATION);
     setPulseLevel(0);
     setUnfoldProgress(0);
     setStepIndex(0);
@@ -632,7 +261,7 @@ export function SpatialOrientationGame({ onExit }) {
     setResult(null);
     setUnfoldProgress(0);
 
-    const sequence = buildRandomSequence(moveCount);
+    const sequence = buildRun({ moveCount }, randomSeed());
 
     const runTurn = (index) => {
       if (index >= sequence.length) {
@@ -699,7 +328,7 @@ export function SpatialOrientationGame({ onExit }) {
 
   const preflightScreen = (
     <GameSetupShell title="Cube Rotation" categoryKey="spatial" onExit={onExit} onStart={startMission} rules="Tests spatial tracking. Follow the marked face as the cube rotates, then identify its final position. Easy: the cube stays visible at a steady pace. Medium: visible rotations move quickly with audio cues. Hard: directions are hidden and delivered at a fast pace.">
-      <PickerSetting label="Difficulty" options={difficultyOptions.map((option, index) => ({ value: option, label: ["EASY", "MEDIUM", "HARD"][index] }))} value={selectedDifficulty} onChange={setSelectedDifficulty} />
+      <PickerSetting label="Difficulty" options={DIFFICULTY_OPTIONS.map((option, index) => ({ value: option, label: ["EASY", "MEDIUM", "HARD"][index] }))} value={selectedDifficulty} onChange={setSelectedDifficulty} />
       <PickerSetting label="Moves" options={Array.from({ length: 12 }, (_, index) => ({ value: index + 4, label: String(index + 4) }))} value={moveCount} onChange={setMoveCount} />
     </GameSetupShell>
   );
@@ -921,12 +550,6 @@ const styles = StyleSheet.create({
   },
   netStage: {
     minHeight: 360,
-  },
-  netWrapper: {
-    width: 280,
-    height: 360,
-    alignItems: "center",
-    justifyContent: "center",
   },
   footerActions: {
     width: "100%",

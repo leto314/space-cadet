@@ -64,3 +64,9 @@ export function randomTools(random) {
   };
   return { random, int, float, item, chance, shuffle };
 }
+
+// A fresh seed for a free (Full Clearance) session: the one place where the app draws on Math.random. Games never
+// call Math.random themselves; they pass a seed to their logic, so any session can be rebuilt from its seed.
+export function randomSeed() {
+  return Math.floor(Math.random() * 4294967296);
+}

@@ -8,8 +8,8 @@ import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
-import { createRandom, deriveSeed, hashString } from "../../utils/random";
-import { buildPuzzle, GLYPHS, levelForIndex, VIEW_SLOTS } from "./cubeNets";
+import { randomSeed } from "../../utils/random";
+import { buildDailyPuzzles, buildSession, cross, dailyResult, DAILY_SETTINGS, GLYPHS, MODE_CYCLE, neg, samplePuzzle, VIEW_SLOTS } from "./logic";
 
 const ACCENT = SPACE_CADET.spatial;
 const SUCCESS = "#34D399";
@@ -20,35 +20,14 @@ const WRONG_PAUSE_MS = 2600;
 const OPTION_GAP = 10;
 const LEVEL_LABELS = { easy: "EASY", medium: "MEDIUM", hard: "HARD" };
 const MODE_LABELS = { fold: "NET → CUBE", refold: "NET → NET", unfold: "CUBE → NET", mixed: "MIXED" };
-const MODE_CYCLE = ["fold", "refold", "unfold"];
 const QUESTIONS = { fold: "WHICH CUBE DOES THIS NET MAKE?", refold: "WHICH NET MAKES THE SAME CUBE?", unfold: "WHICH NET MAKES THIS CUBE?" };
 const FACE_FILLS = ["#1D1D21", "#131316", "#0A0A0C"];
 const GLYPH_STROKE = 0.8;
 
-// Daily training: the same eight puzzles for everyone, every exercise tested, easy to hard.
-export const DAILY_PUZZLES = [
-  { mode: "fold", level: "easy" }, { mode: "refold", level: "easy" }, { mode: "unfold", level: "easy" },
-  { mode: "fold", level: "medium" }, { mode: "refold", level: "medium" }, { mode: "unfold", level: "medium" },
-  { mode: "fold", level: "hard" }, { mode: "unfold", level: "hard" },
-];
-// The ready screen's illustration: a net and the cube it folds into, the same every time.
-const SAMPLE = buildPuzzle("fold", "easy", createRandom(hashString("cube-nets:sample")));
+// The ready screen's illustration.
+const SAMPLE = samplePuzzle();
 const SAMPLE_CUBE = SAMPLE.options[SAMPLE.answerIndex].view;
-const DAILY_SETTINGS = { mode: "mixed", puzzleCount: DAILY_PUZZLES.length, difficulty: "progressive" };
-// Each puzzle has its own seeded stream; a draw that fails to produce four distinct options (rare) moves on to
-// the next stream, so every player still gets the same eight puzzles.
-export function buildDailyPuzzles(seed) {
-  return DAILY_PUZZLES.map(({ mode, level }, index) => {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const puzzle = buildPuzzle(mode, level, createRandom(deriveSeed(seed, `puzzle-${index}:${attempt}`)));
-      if (puzzle) return puzzle;
-    }
-    return null;
-  }).filter(Boolean);
-}
 
-const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const neg = (a) => [-a[0], -a[1], -a[2]];
 function formatSeconds(ms) { return (ms / 1000).toFixed(1); }
 
 // A flat net: one square per face, each glyph turned clockwise by its quarter turns. One cell can be highlighted.
@@ -124,8 +103,7 @@ export function CubeNetsGame({ onExit, daily = null }) {
   function showPuzzle(nextIndex) { setIndex(nextIndex); setSelected(null); puzzleStartedAt.current = Date.now(); goTo("question"); }
   function beginRun() {
     void triggerSelectionHaptic();
-    const { mode: chosen, puzzleCount: total, difficulty: grade } = settingsRef.current;
-    puzzlesRef.current = daily ? buildDailyPuzzles(daily.seed) : Array.from({ length: total }, (_, position) => buildPuzzle(chosen === "mixed" ? MODE_CYCLE[position % MODE_CYCLE.length] : chosen, levelForIndex(grade, position, total))).filter(Boolean);
+    puzzlesRef.current = daily ? buildDailyPuzzles(daily.seed) : buildSession(settingsRef.current, randomSeed());
     sessionStartedAt.current = Date.now();
     intervalRef.current = setInterval(() => setElapsed(Date.now() - sessionStartedAt.current), 100);
     showPuzzle(0);
@@ -142,16 +120,7 @@ export function CubeNetsGame({ onExit, daily = null }) {
       else { clearInterval(intervalRef.current); intervalRef.current = null; if (daily) finishDaily(); else goTo("summary"); }
     }, correct ? CORRECT_PAUSE_MS : WRONG_PAUSE_MS));
   }
-  function finishDaily() {
-    const entries = resultsRef.current;
-    const correctIn = (key) => entries.filter((entry) => entry.mode === key && entry.correct).length;
-    const correct = entries.filter((entry) => entry.correct).length;
-    daily.onFinish({
-      score: Math.round((correct / entries.length) * 1000),
-      metrics: { correct, puzzles: entries.length, netToCube: correctIn("fold"), netToNet: correctIn("refold"), cubeToNet: correctIn("unfold"), meanAnswerMs: Math.round(entries.reduce((sum, entry) => sum + entry.timeMs, 0) / entries.length) },
-      trials: entries.map((entry) => ({ ok: entry.correct ? 1 : 0, ms: entry.timeMs, mode: entry.mode, level: entry.level })),
-    });
-  }
+  function finishDaily() { daily.onFinish(dailyResult(resultsRef.current)); }
 
   const preflight = <GameSetupShell title="Cube Nets" categoryKey="spatial" onExit={onExit} onStart={prepareRun} rules="Tests mental folding. A cube is shown unfolded, seen from the outside, with a letter or digit on each face. The way each character is turned matters.Net → Cube: Pick the cube this net folds into.Net → Net: Pick the other net that folds into the same cube.Cube → Net: The same cube is shown from three corners. Pick the net that makes it.Easy: Wrong answers put opposite faces side by side.Medium: Some wrong answers have the right faces arranged the other way round.Hard: Some wrong answers differ only by one character turned. Progressive starts easy and ends hard.">
     <PickerSetting label="Mode" hint={mode === "mixed" ? "Alternates between all three" : mode === "fold" ? "Find the folded cube" : mode === "refold" ? "Find the matching net" : "One cube, three views: find its net"} options={["fold", "refold", "unfold", "mixed"].map((value) => ({ value, label: MODE_LABELS[value] }))} value={mode} onChange={setMode} />

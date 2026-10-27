@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import Animated, { FadeIn } from "react-native-reanimated";
 import { triggerSelectionHaptic } from "../../utils/haptics";
-import { createRandom, deriveSeed, randomTools } from "../../utils/random";
+import { randomSeed } from "../../utils/random";
+import { buildDailyLadder, createSession, dailyResult, DAILY_QUESTIONS, DAILY_SECONDS, DAILY_STAGES, OPS, POINTS_PER_QUESTION, sampleProblem } from "./logic";
 import { ChoiceButton, ChoiceRow, GameSetupShell, SettingCard, TapePicker } from "../../components/GameSetupShell";
 import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
@@ -11,63 +12,7 @@ import { SPACE_CADET } from "../../theme/spaceCadet";
 const ACCENT = SPACE_CADET.mentalMath;
 const SUCCESS = "#34D399";
 const ERROR = SPACE_CADET.attention;
-const OPS = [{ value: "+", label: "+", name: "addition" }, { value: "-", label: "−", name: "subtraction" }, { value: "×", label: "×", name: "multiplication" }, { value: "÷", label: "÷", name: "division" }];
-const MULTIPLIERS = [2, 2, 3, 4, 4, 5, 5, 6, 8, 9, 10, 10, 12, 15, 20, 25, 50];
-const TABLE_FACTORS = [3, 4, 5, 6, 7, 8, 9, 11, 12];
 const formatTime = (seconds) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-
-// Daily training: a ladder of 25 questions in 5 stages of 5, 2 minutes for everyone, 40 points per right answer.
-// The ladder itself carries the difficulty (you cannot reach question 20 without doing 1 to 19), so every
-// question is worth the same and 25 / 25 in time is out of reach for almost everyone.
-export const DAILY_SECONDS = 120;
-export const DAILY_STAGES = [
-  { label: "ONE OPERATION", operations: ["+", "-"], operationCount: 1, questions: 5 },
-  { label: "TWO OPERATIONS", operations: ["+", "-"], operationCount: 2, questions: 5 },
-  { label: "TIMES AND DIVIDE", operations: ["×", "÷"], operationCount: 1, questions: 5 },
-  { label: "ALL SIGNS", operations: ["+", "-", "×", "÷"], operationCount: 2, questions: 5, requireProduct: true },
-  { label: "THREE OPERATIONS", operations: ["+", "-", "×", "÷"], operationCount: 3, questions: 5, requireProduct: true },
-];
-const DAILY_QUESTIONS = DAILY_STAGES.reduce((sum, stage) => sum + stage.questions, 0);
-const POINTS_PER_QUESTION = 1000 / DAILY_QUESTIONS;
-
-// One expression, drawn from `rnd` (a seeded generator in the daily version, a random one otherwise).
-export function buildProblem({ operations, operationCount, history }, rnd) {
-  const count = operationCount === "random" ? rnd.int(1, 3) : operationCount;
-  const firstCandidates = operations.filter((item) => item !== history.at(-1));
-  const first = operations.length === 1 ? operations[0] : rnd.item(firstCandidates.length ? firstCandidates : operations);
-  const sequence = [first];
-  while (sequence.length < count) { const candidates = operations.filter((item) => item !== sequence.at(-1)); sequence.push(rnd.item(candidates.length ? candidates : operations)); }
-  let total = operations.includes("×") || operations.includes("÷") ? rnd.int(2, 20) : rnd.int(12, 99);
-  // A × or ÷ as the first step is a proper times-table question (13 × 7, 84 ÷ 7), not 3 × 2 or 60 ÷ 10.
-  if (first === "×") total = rnd.int(3, 19);
-  if (first === "÷") { const divisor = rnd.item(TABLE_FACTORS); total = divisor * rnd.int(3, 19); }
-  const tokens = [total];
-  sequence.forEach((operation, index) => {
-    let actual = operation; let operand;
-    if (operation === "+") { operand = total < 100 ? rnd.int(4, 79) : rnd.int(10, 99); total += operand; }
-    else if (operation === "-") { operand = total > 25 ? rnd.int(3, Math.max(3, Math.min(total - 1, 79))) : rnd.int(1, Math.max(1, total - 1)); total -= operand; }
-    else if (operation === "×") { operand = index === 0 ? rnd.item(TABLE_FACTORS) : rnd.item(total * 10 > 9999 ? [2, 2, 3, 4, 5, 10] : MULTIPLIERS); total *= operand; }
-    else { const divisors = (index === 0 ? TABLE_FACTORS : MULTIPLIERS).filter((item) => item > 1 && total % item === 0); if (!divisors.length) { actual = "+"; operand = rnd.int(4, 49); total += operand; } else { operand = rnd.item(divisors); total /= operand; } }
-    tokens.push(actual, operand);
-  });
-  let expression = `${tokens[0]} ${tokens[1]} ${tokens[2]}`;
-  for (let index = 3; index < tokens.length; index += 2) expression = `(${expression}) ${tokens[index]} ${tokens[index + 1]}`;
-  return { answer: total, expression, primaryOperation: first };
-}
-
-// The day's 25 questions, in order, each tagged with its stage.
-export function buildDailyProblems(seed) {
-  const rnd = randomTools(createRandom(seed));
-  const history = [];
-  return DAILY_STAGES.flatMap((stage, stageIndex) => Array.from({ length: stage.questions }, () => {
-    let problem;
-    // An "all signs" question must actually use a × or a ÷.
-    for (let attempt = 0; attempt < 12; attempt += 1) { problem = buildProblem({ operations: stage.operations, operationCount: stage.operationCount, history }, rnd); if (!stage.requireProduct || /[×÷]/.test(problem.expression)) break; }
-    history.push(problem.primaryOperation);
-    return { ...problem, stage: stageIndex };
-  }));
-}
 
 function NumberPad({ onPress, onDelete, onSubmit, disabled, feedback }) {
   const submitLabel = feedback === "success" ? "CORRECT" : feedback === "error" ? "WRONG" : "ENTER";
@@ -88,17 +33,17 @@ function Expression({ value, style }) {
 // of 25 questions in 2 minutes, then onFinish({ score, metrics, trials }).
 export function MentalMathGame({ onExit, daily = null }) {
   const [duration, setDuration] = useState(1); const [operations, setOperations] = useState(["+", "-"]); const [operationCount, setOperationCount] = useState(1); const [phase, setPhase] = useState(daily ? "ready" : "preflight");
-  const [remaining, setRemaining] = useState(daily ? DAILY_SECONDS : 60); const [problem, setProblem] = useState(null); const [readyProblem, setReadyProblem] = useState(() => daily ? buildDailyProblems(deriveSeed(daily.seed, "ladder"))[0] : null); const [questionIndex, setQuestionIndex] = useState(0); const [answer, setAnswer] = useState(""); const [score, setScore] = useState(0); const [attempts, setAttempts] = useState(0); const [correctTimes, setCorrectTimes] = useState([]); const [feedback, setFeedback] = useState(null);
-  const intervalRef = useRef(null); const timeouts = useRef([]); const problemStartedAt = useRef(0); const history = useRef([]); const config = useRef(null); const rndRef = useRef(null); const ladderRef = useRef([]); const resultsRef = useRef([]); const finishedRef = useRef(false);
+  const [remaining, setRemaining] = useState(daily ? DAILY_SECONDS : 60); const [problem, setProblem] = useState(null); const [readyProblem, setReadyProblem] = useState(() => daily ? buildDailyLadder(daily.seed)[0] : null); const [questionIndex, setQuestionIndex] = useState(0); const [answer, setAnswer] = useState(""); const [score, setScore] = useState(0); const [attempts, setAttempts] = useState(0); const [correctTimes, setCorrectTimes] = useState([]); const [feedback, setFeedback] = useState(null);
+  const intervalRef = useRef(null); const timeouts = useRef([]); const problemStartedAt = useRef(0); const sessionRef = useRef(null); const ladderRef = useRef([]); const resultsRef = useRef([]); const finishedRef = useRef(false);
   const { isReturning, missionStyle, preflightStyle, startMission, returnToPreflight } = useMissionTransition({ onPrepareReturn: clearTimers, onReturnComplete: resetToPreflight });
   useEffect(() => () => clearTimers(), []);
   function clearTimers() { clearInterval(intervalRef.current); intervalRef.current = null; timeouts.current.forEach(clearTimeout); timeouts.current = []; }
   function resetToPreflight() { clearTimers(); setFeedback(null); setProblem(null); setAnswer(""); setPhase("preflight"); }
-  function resetToReady() { clearTimers(); setFeedback(null); setProblem(null); setAnswer(""); rndRef.current = randomTools(createRandom(Math.floor(Math.random() * 4294967296))); setReadyProblem(buildProblem({ operations, operationCount, history: [] }, rndRef.current)); setPhase("ready"); }
+  function resetToReady() { clearTimers(); setFeedback(null); setProblem(null); setAnswer(""); setReadyProblem(sampleProblem({ operations, operationCount }, randomSeed())); setPhase("ready"); }
   function nextProblem(index) {
     let next;
     if (daily) { next = ladderRef.current[index]; if (!next) { finishGame(); return; } }
-    else { next = buildProblem({ ...config.current, history: history.current }, rndRef.current); history.current = [...history.current, next.primaryOperation].slice(-12); }
+    else next = sessionRef.current.next();
     setQuestionIndex(index); setProblem(next); setAnswer(""); problemStartedAt.current = Date.now();
   }
   function finishGame() {
@@ -106,20 +51,11 @@ export function MentalMathGame({ onExit, daily = null }) {
     finishedRef.current = true;
     clearTimers();
     if (!daily) { setPhase("summary"); return; }
-    const results = resultsRef.current;
-    const correct = results.filter((entry) => entry.ok).length;
-    const times = results.filter((entry) => entry.ok).map((entry) => entry.ms);
-    const stageReached = results.length ? ladderRef.current[results.length - 1].stage + 1 : 0;
-    daily.onFinish({
-      score: clamp(Math.round(correct * POINTS_PER_QUESTION), 0, 1000),
-      metrics: { correct, answered: results.length, questions: DAILY_QUESTIONS, stageReached, accuracy: results.length ? Math.round((correct / results.length) * 100) : 0, meanCorrectMs: times.length ? Math.round(times.reduce((sum, value) => sum + value, 0) / times.length) : null },
-      trials: results,
-    });
+    daily.onFinish(dailyResult(resultsRef.current, ladderRef.current));
   }
   function startGame() {
     clearTimers(); finishedRef.current = false; resultsRef.current = [];
-    config.current = { operations, operationCount }; history.current = [];
-    if (daily) ladderRef.current = buildDailyProblems(deriveSeed(daily.seed, "ladder"));
+    if (daily) ladderRef.current = buildDailyLadder(daily.seed); else sessionRef.current = createSession({ operations, operationCount }, randomSeed());
     setScore(0); setAttempts(0); setCorrectTimes([]); setFeedback(null); setRemaining(daily ? DAILY_SECONDS : duration * 60); setPhase("playing"); nextProblem(0);
     intervalRef.current = setInterval(() => setRemaining((current) => { if (current <= 1) { finishGame(); return 0; } return current - 1; }), 1000);
   }

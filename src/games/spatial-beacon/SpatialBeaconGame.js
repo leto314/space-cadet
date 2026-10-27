@@ -4,17 +4,12 @@ import Svg, { Circle, G, Line, Path, Polygon, Text as SvgText } from "react-nati
 import Animated, { FadeIn } from "react-native-reanimated";
 
 import { triggerSelectionHaptic } from "../../utils/haptics";
-import { createRandom } from "../../utils/random";
+import { randomSeed } from "../../utils/random";
 import { GameSetupShell, PickerSetting } from "../../components/GameSetupShell";
 import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
-
-const DEFAULT_ROUNDS = 10;
-const MIN_ROUNDS = 5;
-const MAX_ROUNDS = 15;
-const HEADING_ANGLES = Array.from({ length: 24 }, (_, index) => index * 15);
-const ANSWER_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315];
+import { angleToRadians, buildDailyTrials, buildSession, dailyResult, DAILY_STAGES, DEFAULT_ROUNDS, getAngleFromDrag, releasedInSlot, sessionSummary, SLOT_DEFINITIONS } from "./logic";
 
 const THEME_LIGHT = SPACE_CADET.black;
 const THEME_DARK = SPACE_CADET.white;
@@ -22,17 +17,6 @@ const THEME_MUTED = SPACE_CADET.textSecondary;
 const THEME_ACCENT = SPACE_CADET.spatial;
 const SUCCESS = "#34D399";
 const ERROR = SPACE_CADET.attention;
-
-const slotDefinitions = [
-  { key: "nw", angle: 315, row: 0, col: 0 },
-  { key: "n", angle: 0, row: 0, col: 1 },
-  { key: "ne", angle: 45, row: 0, col: 2 },
-  { key: "w", angle: 270, row: 1, col: 0 },
-  { key: "e", angle: 90, row: 1, col: 2 },
-  { key: "sw", angle: 225, row: 2, col: 0 },
-  { key: "s", angle: 180, row: 2, col: 1 },
-  { key: "se", angle: 135, row: 2, col: 2 },
-];
 
 const difficultyOptions = [
   {
@@ -57,127 +41,6 @@ const difficultyOptions = [
     example: "Select the correct heading, then drag outward from the central beacon.",
   },
 ];
-
-// Trials draw from `rng`, which is pointed at a seeded generator for the daily version.
-let rng = Math.random;
-
-function randomItem(items) {
-  return items[Math.floor(rng() * items.length)];
-}
-
-function shuffle(items) {
-  const copy = [...items];
-
-  for (let index = copy.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(rng() * (index + 1));
-    const current = copy[index];
-    copy[index] = copy[swapIndex];
-    copy[swapIndex] = current;
-  }
-
-  return copy;
-}
-
-function normalizeAngle(value) {
-  return ((value % 360) + 360) % 360;
-}
-
-function angleToRadians(angle) {
-  return (angle * Math.PI) / 180;
-}
-
-function average(values) {
-  if (values.length === 0) {
-    return null;
-  }
-
-  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
-}
-
-function angleDifference(left, right) {
-  const difference = Math.abs(normalizeAngle(left - right));
-  return Math.min(difference, 360 - difference);
-}
-
-function buildOptionAngles(correctAngle) {
-  const options = [correctAngle];
-
-  while (options.length < 4) {
-    const candidate = randomItem(HEADING_ANGLES);
-    const isDistinct = options.every((angle) => angleDifference(angle, candidate) >= 30);
-
-    if (isDistinct) {
-      options.push(candidate);
-    }
-  }
-
-  return shuffle(options);
-}
-
-function buildEasyTrial() {
-  const heading = randomItem(HEADING_ANGLES);
-
-  return {
-    heading,
-    optionAngles: buildOptionAngles(heading),
-  };
-}
-
-function buildSpatialTrial(includeOptions) {
-  const heading = randomItem(HEADING_ANGLES);
-  const answerAngle = randomItem(ANSWER_ANGLES);
-  const relativeBearing = normalizeAngle(answerAngle - heading - 180);
-
-  return {
-    heading,
-    answerAngle,
-    relativeBearing,
-    optionAngles: includeOptions ? buildOptionAngles(heading) : [],
-  };
-}
-
-function buildTrial(mode) {
-  return { mode, ...(mode === "easy" ? buildEasyTrial() : buildSpatialTrial(mode === "hard")) };
-}
-
-function buildTrials(difficulty, count) {
-  return Array.from({ length: count }, () => buildTrial(difficulty.key));
-}
-
-// Daily training: the same ten rounds for everyone, in three stages of growing difficulty.
-export const DAILY_STAGES = [{ mode: "easy", rounds: 3 }, { mode: "medium", rounds: 3 }, { mode: "hard", rounds: 4 }];
-export function buildDailyTrials(seed) {
-  rng = createRandom(seed);
-  try { return DAILY_STAGES.flatMap((stage) => Array.from({ length: stage.rounds }, () => buildTrial(stage.mode))); } finally { rng = Math.random; }
-}
-
-// The matrix is 3 x 3 cells around the beacon. A release counts as a placement only inside one of the eight
-// outer cells; anywhere else (outside the matrix, or back on the beacon) it is treated as a plain tap.
-const MATRIX_HALF = 143;
-function releasedInSlot(dx, dy) {
-  const cell = (MATRIX_HALF * 2) / 3;
-  if (Math.abs(dx) > MATRIX_HALF || Math.abs(dy) > MATRIX_HALF) return false;
-  return !(Math.abs(dx) < cell / 2 && Math.abs(dy) < cell / 2);
-}
-
-function getAngleFromDrag(dx, dy) {
-  const distance = Math.sqrt(dx * dx + dy * dy);
-
-  if (distance < 26) {
-    return null;
-  }
-
-  const rawAngle = normalizeAngle((Math.atan2(dx, -dy) * 180) / Math.PI);
-  let bestSlot = slotDefinitions[0];
-
-  slotDefinitions.forEach((slot) => {
-    if (angleDifference(rawAngle, slot.angle) < angleDifference(rawAngle, bestSlot.angle)) {
-      bestSlot = slot;
-    }
-  });
-
-  return bestSlot.angle;
-}
 
 function AircraftIcon({ size = 80, color = THEME_DARK }) {
   return (
@@ -360,7 +223,7 @@ function PlacementMatrix({
         {Array.from({ length: 9 }, (_, index) => {
           const row = Math.floor(index / 3);
           const col = index % 3;
-          const slot = slotDefinitions.find((item) => item.row === row && item.col === col);
+          const slot = SLOT_DEFINITIONS.find((item) => item.row === row && item.col === col);
           const isCenter = row === 1 && col === 1;
 
           if (isCenter) {
@@ -458,34 +321,7 @@ export function SpatialBeaconGame({ onExit, daily = null }) {
     };
   }, []);
 
-  const summary = useMemo(() => {
-    if (results.length === 0) {
-      return null;
-    }
-
-    if (selectedDifficulty?.key === "hard") {
-      const stage1Reactions = results.map((item) => item.stage1ReactionMs).filter(Boolean);
-      const stage2Reactions = results.map((item) => item.stage2ReactionMs).filter(Boolean);
-
-      return {
-        stage1Correct: results.filter((item) => item.stage1Correct).length,
-        stage2Correct: results.filter((item) => item.stage2Correct).length,
-        perfectRounds: results.filter((item) => item.stage1Correct && item.stage2Correct).length,
-        stage1Average: average(stage1Reactions),
-        stage2Average: average(stage2Reactions),
-      };
-    }
-
-    const reactionValues = results.map((item) => item.reactionMs).filter(Boolean);
-    const correctCount = results.filter((item) => item.correct).length;
-
-    return {
-      correctCount,
-      accuracy: Math.round((correctCount / results.length) * 100),
-      averageReaction: average(reactionValues),
-      bestReaction: reactionValues.length > 0 ? Math.min(...reactionValues) : null,
-    };
-  }, [results, selectedDifficulty]);
+  const summary = useMemo(() => sessionSummary(results, selectedDifficulty?.key), [results, selectedDifficulty]);
 
   function clearTimers() {
     timeouts.current.forEach(clearTimeout);
@@ -568,20 +404,7 @@ export function SpatialBeaconGame({ onExit, daily = null }) {
     setPhase("difficulty");
   }
 
-  function finishDaily(finalResults) {
-    const rounds = finalResults.map((result, index) => {
-      const trial = trials[index];
-      const ok = trial.mode === "hard" ? Boolean(result.stage1Correct && result.stage2Correct) : Boolean(result.correct);
-      return { mode: trial.mode, ok: ok ? 1 : 0, ms: result.reactionMs ?? result.stage1ReactionMs ?? null, ms2: result.stage2ReactionMs ?? null, tap: result.fallback ? 1 : 0 };
-    });
-    const correctIn = (stageMode) => rounds.filter((round) => round.mode === stageMode && round.ok).length;
-    const times = rounds.map((round) => (round.ms ?? 0) + (round.ms2 ?? 0)).filter(Boolean);
-    daily.onFinish({
-      score: Math.round((rounds.filter((round) => round.ok).length / rounds.length) * 1000),
-      metrics: { correct: rounds.filter((round) => round.ok).length, rounds: rounds.length, heading: correctIn("easy"), position: correctIn("medium"), combined: correctIn("hard"), tapPlacements: rounds.filter((round) => round.tap).length, meanRoundMs: times.length ? Math.round(times.reduce((sum, value) => sum + value, 0) / times.length) : null },
-      trials: rounds,
-    });
-  }
+  function finishDaily(finalResults) { daily.onFinish(dailyResult(finalResults, trials)); }
 
   function moveToNextTrial(nextResults) {
     const nextIndex = trialIndex + 1;
@@ -621,7 +444,7 @@ export function SpatialBeaconGame({ onExit, daily = null }) {
     }
 
     clearTimers();
-    setTrials(daily ? buildDailyTrials(daily.seed) : buildTrials(selectedDifficulty, roundCount));
+    setTrials(daily ? buildDailyTrials(daily.seed) : buildSession({ mode: selectedDifficulty.key, roundCount }, randomSeed()));
     setResults([]);
     setTrialIndex(0);
     resetRoundState();
