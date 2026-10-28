@@ -9,6 +9,8 @@ import { PulsingPrompt } from "../../components/PulsingPrompt";
 import { useMissionTransition } from "../../hooks/useMissionTransition";
 import { SPACE_CADET } from "../../theme/spaceCadet";
 import { triggerErrorHaptic, triggerSelectionHaptic, triggerSuccessHaptic } from "../../utils/haptics";
+import { randomSeed } from "../../utils/random";
+import { buildDailySession, buildSession, bulbsOf, circuitEntry, dailyResult, DAILY_CIRCUITS, evaluate, flipBudget, gateSetFor, range, sameBits } from "./logic";
 
 const ACCENT = SPACE_CADET.logic;
 const SUCCESS = "#34D399";
@@ -40,145 +42,7 @@ const READY_COPY = {
 };
 const GATE_MEANINGS = { AND: "both inputs on", OR: "at least one input on", NOT: "inverts its input", XOR: "exactly one input on", NAND: "not both inputs on", NOR: "neither input on", XNOR: "both inputs the same" };
 
-// ---- Circuit generator (pure, no React) ----------------------------------------------------------------
-const GATES = {
-  AND: (a, b) => a & b, OR: (a, b) => a | b, XOR: (a, b) => a ^ b,
-  NAND: (a, b) => 1 - (a & b), NOR: (a, b) => 1 - (a | b), XNOR: (a, b) => 1 - (a ^ b), NOT: (a) => 1 - a,
-};
-// Switches at the bottom, then gate layers; each gate in the top layer drives one bulb. The switch-flipping mode
-// uses bigger boards (3 to 6 switches) so the answer can't be found by blind trial and error.
-const TEMPLATES = [
-  { inputs: 2, layers: [2, 1] }, { inputs: 3, layers: [2, 1] }, { inputs: 3, layers: [2, 2] }, { inputs: 3, layers: [3, 2] },
-  { inputs: 4, layers: [3, 2] }, { inputs: 3, layers: [2, 2, 1] }, { inputs: 4, layers: [2, 2, 1] }, { inputs: 4, layers: [3, 2, 2] },
-];
-const INPUT_TEMPLATES = [
-  { inputs: 3, layers: [2, 2] }, { inputs: 3, layers: [3, 2] }, { inputs: 4, layers: [2, 2] }, { inputs: 4, layers: [3, 2] }, { inputs: 4, layers: [2, 2, 1] },
-  { inputs: 5, layers: [3, 2] }, { inputs: 5, layers: [3, 2, 2] }, { inputs: 5, layers: [3, 3, 2] },
-  { inputs: 6, layers: [3, 2] }, { inputs: 6, layers: [3, 3, 2] }, { inputs: 6, layers: [4, 3, 2] },
-];
-const GENERATION_ATTEMPTS = 2500;
-const range = (from, to) => Array.from({ length: Math.max(0, to - from + 1) }, (_, index) => from + index);
-
-export function gateSetFor({ withXor, withNegated }) {
-  const set = ["AND", "OR", "NOT"];
-  if (withXor) set.push("XOR");
-  if (withNegated) set.push("NAND", "NOR");
-  if (withXor && withNegated) set.push("XNOR");
-  return set;
-}
-
-function makeRandomTools(random) {
-  const int = (min, max) => Math.floor(random() * (max - min + 1)) + min;
-  const item = (items) => items[Math.floor(random() * items.length)];
-  const shuffle = (items) => {
-    const copy = [...items];
-    for (let index = copy.length - 1; index > 0; index -= 1) { const swapIndex = Math.floor(random() * (index + 1)); [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]]; }
-    return copy;
-  };
-  const weighted = (entries) => {
-    let roll = random() * entries.reduce((sum, entry) => sum + entry.weight, 0);
-    for (const entry of entries) { roll -= entry.weight; if (roll < 0) return entry; }
-    return entries.at(-1);
-  };
-  return { int, item, shuffle, weighted };
-}
-
-// rows[0] = switch values, rows[k] = outputs of gate layer k-1; the last row is also the bulbs.
-export function evaluate(circuit, inputs, override = null) {
-  const rows = [inputs];
-  circuit.layers.forEach((layer, layerIndex) => {
-    rows.push(layer.map((gate, gateIndex) => {
-      const type = override && override.layer === layerIndex && override.index === gateIndex ? override.type : gate.type;
-      return GATES[type](...gate.sources.map((source) => rows[layerIndex][source]));
-    }));
-  });
-  return rows;
-}
-const bulbsOf = (circuit, inputs, override) => evaluate(circuit, inputs, override).at(-1);
-const toBits = (mask, count) => range(0, count - 1).map((index) => (mask >> index) & 1);
-const sameBits = (a, b) => a.every((value, index) => value === b[index]);
-const bitSum = (bits) => bits.reduce((sum, bit) => sum + bit, 0);
-
-// Gates prefer sources roughly below them, so wiring stays local and readable instead of criss-crossing the board.
-function buildWiring(template, gateSet, rnd) {
-  const layers = [];
-  let belowCount = template.inputs;
-  for (const count of template.layers) {
-    const layer = [];
-    for (let index = 0; index < count; index += 1) {
-      const type = rnd.item([...gateSet.filter((gate) => gate !== "NOT"), ...gateSet]);
-      const center = ((index + 0.5) / count) * belowCount - 0.5;
-      const sources = [];
-      while (sources.length < (type === "NOT" ? 1 : 2)) {
-        const pool = range(0, belowCount - 1).filter((source) => !sources.includes(source)).map((source) => ({ source, weight: 1 / (1 + (source - center) ** 2) }));
-        sources.push(rnd.weighted(pool).source);
-      }
-      layer.push({ type, sources: sources.sort((a, b) => a - b) });
-    }
-    // Every switch/gate below must feed something, and no two gates may be identical twins.
-    if (new Set(layer.flatMap((gate) => gate.sources)).size < belowCount) return null;
-    if (new Set(layer.map((gate) => `${gate.type}:${gate.sources}`)).size < layer.length) return null;
-    layers.push(layer);
-    belowCount = count;
-  }
-  return { inputCount: template.inputs, layers };
-}
-
-// `random` is injectable for the seeded daily challenge.
-export function buildCircuit(mode, gateSet, random = Math.random) {
-  const rnd = makeRandomTools(random);
-  if (mode !== "inputs") return generate(mode, gateSet, TEMPLATES, rnd);
-  // The switch count is drawn first so 3, 4, 5 and 6 switches come up equally often (small boards pass the
-  // constraints more easily and would otherwise dominate); a rare dead end falls back to one switch fewer.
-  for (let switchCount = rnd.int(3, 6); switchCount >= 3; switchCount -= 1) {
-    const circuit = generate(mode, gateSet, INPUT_TEMPLATES.filter((template) => template.inputs === switchCount), rnd);
-    if (circuit) return circuit;
-  }
-  return null;
-}
-
-function generate(mode, gateSet, templates, rnd) {
-  const binaryGates = gateSet.filter((gate) => gate !== "NOT");
-  for (let attempt = 0; attempt < GENERATION_ATTEMPTS; attempt += 1) {
-    const circuit = buildWiring(rnd.item(templates), gateSet, rnd);
-    if (!circuit) continue;
-    const combos = range(0, 2 ** circuit.inputCount - 1).map((mask) => toBits(mask, circuit.inputCount));
-    const table = combos.map((inputs) => bulbsOf(circuit, inputs));
-    // A bulb that is always on (or always off) whatever the switches is dead weight.
-    if (table[0].some((_, bulb) => table.every((row) => row[bulb] === table[0][bulb]))) continue;
-
-    if (mode === "inputs") {
-      // Few enough solutions that blind flipping is hopeless: one for 3-4 switches, at most 2 for 5 and 4 for 6.
-      const target = table[rnd.int(1, combos.length - 1)];
-      const solutions = combos.filter((_, row) => sameBits(table[row], target));
-      if (solutions.length > Math.max(1, Math.floor(combos.length / 16)) || sameBits(table[0], target)) continue;
-      return { ...circuit, mode, inputs: solutions[0], target, minFlips: Math.min(...solutions.map(bitSum)), solutionCount: solutions.length };
-    }
-
-    const inputs = combos[rnd.int(1, combos.length - 1)];
-    const target = bulbsOf(circuit, inputs);
-    if (mode === "outputs") return { ...circuit, mode, inputs, target };
-
-    // Missing gate: only a two-input gate can go missing (the choices must fit its slot). A gate outputs a single
-    // bit, so two options with the same output always light the same bulbs: the distractors are therefore the
-    // gates that output the opposite bit for these inputs, and exactly one offered gate can reproduce the target.
-    const rows = evaluate(circuit, inputs);
-    const candidates = rnd.shuffle(circuit.layers.flatMap((layer, layerIndex) => layer.map((gate, index) => ({ layer: layerIndex, index, gate })).filter(({ gate }) => gate.type !== "NOT")));
-    for (const { layer, index, gate } of candidates) {
-      const pins = gate.sources.map((source) => rows[layer][source]);
-      const opposite = binaryGates.filter((type) => GATES[type](...pins) !== GATES[gate.type](...pins));
-      const options = [gate.type, ...rnd.shuffle(opposite).slice(0, 3)];
-      if (options.length < 2) continue;
-      const working = options.filter((type) => sameBits(bulbsOf(circuit, inputs, { layer, index, type }), target));
-      if (working.length !== 1) continue;
-      return { ...circuit, mode, inputs, target, missing: { layer, index }, answerType: gate.type, options: rnd.shuffle(options) };
-    }
-  }
-  return null;
-}
-// ---------------------------------------------------------------------------------------------------------
-
-// ---- Layout (pure) ----------------------------------------------------------------------------------------
+// ---- Layout (pure, but about pixels: it stays with the screen) -------------------------------------------
 // Spreads nodes toward their preferred x while keeping a minimum gap and staying inside [lo, hi].
 function spreadPositions(targets, minGap, lo, hi) {
   const count = targets.length;
@@ -219,7 +83,7 @@ function laneCrossings(wires, laneY) {
 // Each gate sits above its sources where possible, so most wires are straight. A source beside a gate enters it
 // from the side (one bend); only the remaining wires take the up-across-up route, on lanes ordered to minimise
 // crossings. Junction dots mark where one output splits towards several gates.
-export function layoutCircuit(circuit, width, height) {
+function layoutCircuit(circuit, width, height) {
   const rowCount = circuit.layers.length + 2;
   const top = 60;
   const bottom = 24;
@@ -445,12 +309,14 @@ function CircuitBoard({ circuit, width, height, values, visible, wireVisible, ba
 
 function formatSeconds(ms) { return (ms / 1000).toFixed(1); }
 
-export function CircuitsGame({ onExit }) {
+// `daily` ({ seed, onFinish, onExit }) turns this into the daily training version: no preflight, the day's six
+// circuits (DAILY_CIRCUITS), each worth 0–100 points, then onFinish({ score, metrics, trials }).
+export function CircuitsGame({ onExit, daily = null }) {
   const [mode, setMode] = useState("outputs");
   const [circuitCount, setCircuitCount] = useState(5);
   const [withXor, setWithXor] = useState(false);
   const [withNegated, setWithNegated] = useState(false);
-  const [phase, setPhase] = useState("preflight");
+  const [phase, setPhase] = useState(daily ? "ready" : "preflight");
   const [index, setIndex] = useState(0);
   const [switchValues, setSwitchValues] = useState([]);
   const [predictions, setPredictions] = useState([]);
@@ -462,9 +328,10 @@ export function CircuitsGame({ onExit }) {
   const [elapsed, setElapsed] = useState(0);
   const [results, setResults] = useState([]);
   const [board, setBoard] = useState(null);
-  const phaseRef = useRef("preflight");
+  const [legendOpen, setLegendOpen] = useState(false);
+  const phaseRef = useRef(daily ? "ready" : "preflight");
   const lockedRef = useRef(false);
-  const settingsRef = useRef(null);
+  const settingsRef = useRef(daily ? { mode: "daily", circuitCount: DAILY_CIRCUITS.length, gateSet: gateSetFor({ withXor: true, withNegated: true }) } : null);
   const circuitsRef = useRef([]);
   const resultsRef = useRef([]);
   const clockBase = useRef(0);
@@ -506,8 +373,7 @@ export function CircuitsGame({ onExit }) {
   }
   function beginRun() {
     void triggerSelectionHaptic();
-    const { mode: chosenMode, circuitCount: total, gateSet } = settingsRef.current;
-    circuitsRef.current = range(0, total - 1).map(() => buildCircuit(chosenMode === "mixed" ? ["gate", "inputs", "outputs"][Math.floor(Math.random() * 3)] : chosenMode, gateSet)).filter(Boolean);
+    circuitsRef.current = daily ? buildDailySession(daily.seed) : buildSession(settingsRef.current, randomSeed());
     clockBase.current = 0;
     showCircuit(0);
   }
@@ -516,7 +382,7 @@ export function CircuitsGame({ onExit }) {
     lockedRef.current = true;
     pauseClock();
     const circuit = circuitsRef.current[index];
-    resultsRef.current = [...resultsRef.current, { mode: circuit.mode, correct, timeMs: Date.now() - circuitStartedAt.current, ...extra }];
+    resultsRef.current = [...resultsRef.current, circuitEntry(circuit, { correct, timeMs: Date.now() - circuitStartedAt.current, ...extra })];
     const flowMs = (circuit.layers.length + 1 - fromRow) * STEP_MS + 160;
     timeouts.current.push(setTimeout(() => {
       setResults(resultsRef.current);
@@ -538,7 +404,8 @@ export function CircuitsGame({ onExit }) {
     const next = switchValues.map((value, position) => (position === switchIndex ? 1 - value : value));
     const nextFlips = flips + 1;
     setSwitchValues(next); setFlips(nextFlips); setRevealed(true); setBase(0);
-    if (sameBits(bulbsOf(circuit, next), circuit.target)) settle(0, true, { flips: nextFlips, minFlips: circuit.minFlips });
+    if (sameBits(bulbsOf(circuit, next), circuit.target)) settle(0, true, { flips: nextFlips });
+    else if (daily && nextFlips >= flipBudget(circuit).cap) settle(0, false, { flips: nextFlips });
   }
   function toggleBulb(bulbIndex) {
     if (lockedRef.current) return;
@@ -553,8 +420,9 @@ export function CircuitsGame({ onExit }) {
   }
   function nextCircuit() {
     if (index + 1 < circuitsRef.current.length) showCircuit(index + 1);
-    else goTo("summary");
+    else if (daily) finishDaily(); else goTo("summary");
   }
+  function finishDaily() { daily.onFinish(dailyResult(resultsRef.current)); }
 
   const gateHint = [...gateSetFor({ withXor, withNegated })].join(" · ");
   const preflight = <GameSetupShell title="Circuits" categoryKey="logic" onExit={onExit} onStart={prepareRun} rules="Tests logical reasoning. Current flows up from the switches, through the logic gates, to the bulbs. AND passes current when both inputs are on, OR when at least one is, NOT inverts its input and XOR passes when exactly one input is on. NAND, NOR and XNOR are the inverted versions of AND, OR and XOR.Easy: AND, OR and NOT, predicting the bulbs.Medium: Add XOR, or find the missing gate.Hard: All seven gates in mixed modes.">
@@ -585,20 +453,24 @@ export function CircuitsGame({ onExit }) {
   const correctCount = results.filter((entry) => entry.correct).length;
   const flipResults = results.filter((entry) => entry.mode === "inputs");
   const lastResult = results.at(-1);
-  const readyCopy = READY_COPY[settings.mode];
-  const verdict = feedback === "correct" ? (circuit?.mode === "inputs" ? "CIRCUIT CLOSED" : "CORRECT") : "NOT QUITE";
+  const readyCopy = daily ? { title: "Trace the current", text: "Predict the bulbs, find the missing gate, then set the switches: six circuits, more gates as you go." } : READY_COPY[settings.mode];
+  const verdict = feedback === "correct" ? (circuit?.mode === "inputs" ? "CIRCUIT CLOSED" : "CORRECT") : circuit?.mode === "inputs" ? "OUT OF FLIPS" : "NOT QUITE";
   const verdictDetail = !feedback || !circuit ? null
     : circuit.mode === "gate" ? (feedback === "correct" ? `${circuit.answerType} closes the circuit` : `The missing gate was ${circuit.answerType}`)
       : circuit.mode === "inputs" ? `${lastResult?.flips} flips · minimum ${circuit.minFlips}`
         : feedback === "correct" ? "Every bulb predicted" : "Some bulbs were wrong";
+  const budget = circuit?.mode === "inputs" && daily ? flipBudget(circuit) : null;
 
   return <View style={styles.container}>
     {phase === "preflight" || isReturning ? <Animated.View style={[styles.preflightLayer, isReturning && preflightStyle]}>{preflight}</Animated.View> : null}
-    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, missionStyle]}>
-      <View style={styles.header}><Pressable onPress={returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable></View>
+    {phase !== "preflight" ? <Animated.View pointerEvents={isReturning ? "none" : "auto"} style={[styles.missionLayer, !daily && missionStyle]}>
+      <View style={styles.header}>
+        <Pressable onPress={daily ? daily.onExit : returnToPreflight} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}><Text style={styles.backArrow}>←</Text></Pressable>
+        <Pressable onPress={() => setLegendOpen(true)} hitSlop={8} accessibilityLabel="What each gate does" style={({ pressed }) => [styles.infoButton, pressed && styles.pressed]}><Text style={styles.infoText}>i</Text></Pressable>
+      </View>
 
       {phase === "ready" ? <Pressable onPress={beginRun} style={styles.readyScreen}>
-        <Text style={styles.kicker}>LOGIC</Text>
+        <Text style={styles.kicker}>{daily ? "DAILY TRAINING" : "LOGIC"}</Text>
         <Text style={styles.readyTitle}>{readyCopy.title}</Text>
         <Text style={styles.readyText}>{readyCopy.text}</Text>
         <View style={styles.cueCard}>
@@ -610,8 +482,9 @@ export function CircuitsGame({ onExit }) {
 
       {phase === "playing" && circuit ? <Animated.View key={index} entering={FadeIn.duration(180)} style={styles.playScreen}>
         <View style={styles.statusRow}>
-          <View><Text style={styles.statusLabel}>CIRCUIT</Text><Text style={styles.statusValue}>{index + 1}<Text style={styles.statusTotal}> / {circuitsRef.current.length}</Text></Text></View>
-          <View style={styles.statusRight}><Text style={styles.statusLabel}>TIME</Text><Text style={styles.statusValue}>{formatSeconds(elapsed)}</Text></View>
+          <View style={styles.statusColumn}><Text style={styles.statusLabel}>CIRCUIT</Text><Text style={styles.statusValue}>{index + 1}<Text style={styles.statusTotal}> / {circuitsRef.current.length}</Text></Text></View>
+          <View style={styles.stageTag}>{daily ? <><Text style={styles.statusLabel}>{circuit.label}</Text><Text style={styles.stageGates}>{circuit.gateSet.join(" · ")}</Text></> : null}</View>
+          <View style={[styles.statusColumn, styles.statusRight]}>{budget ? <><Text style={styles.statusLabel}>FLIPS</Text><Text style={styles.statusValue}>{flips}<Text style={styles.statusTotal}> / {budget.cap}</Text></Text></> : daily ? null : <><Text style={styles.statusLabel}>TIME</Text><Text style={styles.statusValue}>{formatSeconds(elapsed)}</Text></>}</View>
         </View>
         <View style={styles.boardArea} onLayout={(event) => setBoard(event.nativeEvent.layout)}>
           {board ? <CircuitBoard circuit={circuit} width={board.width} height={board.height} values={values} visible={visible} wireVisible={wireVisible} base={base} chosenType={chosenType} feedback={feedback} predictions={predictions} switchValues={switchValues}
@@ -624,7 +497,7 @@ export function CircuitsGame({ onExit }) {
           </>
             : circuit.mode === "gate" ? <View style={styles.optionRow}>{circuit.options.map((type) => <Pressable key={type} disabled={Boolean(chosenType)} onPress={() => chooseGate(type)} style={({ pressed }) => [styles.gateOption, chosenType === type && styles.gateOptionChosen, pressed && styles.pressed]}><Text style={[styles.gateOptionText, chosenType === type && { color: ACCENT }]}>{type}</Text></Pressable>)}</View>
               : circuit.mode === "outputs" ? <PressScaleButton onPress={validatePrediction}>{revealed ? "Checking…" : "Validate"}</PressScaleButton>
-                : <Text style={styles.flipCount}>{flips} {flips === 1 ? "FLIP" : "FLIPS"}</Text>}
+                : <Text style={styles.flipCount}>{budget ? `${flips} ${flips === 1 ? "FLIP" : "FLIPS"} · FULL POINTS WITHIN ${budget.par}` : `${flips} ${flips === 1 ? "FLIP" : "FLIPS"}`}</Text>}
         </View>
       </Animated.View> : null}
 
@@ -644,19 +517,29 @@ export function CircuitsGame({ onExit }) {
           <TouchableOpacity activeOpacity={0.88} onPress={returnToPreflight} style={styles.secondaryButton}><Text style={styles.secondaryText}>Change settings</Text></TouchableOpacity>
         </View>
       </Animated.View> : null}
+
+      {legendOpen ? <Pressable onPress={() => setLegendOpen(false)} style={styles.legendBackdrop}>
+        <Animated.View entering={FadeIn.duration(140)} style={styles.legendCard}>
+          <Text style={styles.cueLabel}>THE GATES · CURRENT FLOWS UPWARDS</Text>
+          {(daily ? gateSetFor({ withXor: true, withNegated: true }) : settings.gateSet).map((gate) => <View key={gate} style={styles.legendRow}><Text style={styles.legendGate}>{gate}</Text><Text style={styles.legendText}>{GATE_MEANINGS[gate]}</Text></View>)}
+          <Text style={styles.legendClose}>TAP ANYWHERE TO CLOSE</Text>
+        </Animated.View>
+      </Pressable> : null}
     </Animated.View> : null}
   </View>;
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SPACE_CADET.black }, preflightLayer: { ...StyleSheet.absoluteFill, zIndex: 1 }, missionLayer: { flex: 1, backgroundColor: SPACE_CADET.black, zIndex: 2 },
-  header: { height: 64, paddingHorizontal: 20, justifyContent: "center" }, backButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" }, backArrow: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 32, lineHeight: 36 }, pressed: { transform: [{ scale: 0.97 }] },
+  header: { height: 64, paddingHorizontal: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, backButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  infoButton: { width: 30, height: 30, borderRadius: 15, borderWidth: 1, borderColor: SPACE_CADET.borderDefault, alignItems: "center", justifyContent: "center", marginRight: 7 }, infoText: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 15, lineHeight: 18 },
+  legendBackdrop: { ...StyleSheet.absoluteFill, zIndex: 10, backgroundColor: "rgba(0,0,0,0.82)", alignItems: "center", justifyContent: "center", paddingHorizontal: 24 }, legendCard: { width: "100%", borderRadius: 22, paddingVertical: 20, paddingHorizontal: 22, backgroundColor: SPACE_CADET.surface1, gap: 9 }, legendClose: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 1.5, textAlign: "center", marginTop: 10 }, backArrow: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 32, lineHeight: 36 }, pressed: { transform: [{ scale: 0.97 }] },
   kicker: { color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.9, textAlign: "center" },
   readyScreen: { flex: 1, alignItems: "center", paddingHorizontal: 28, paddingTop: 40 }, readyTitle: { color: SPACE_CADET.white, fontFamily: "Gontserrat-Light", fontSize: 30, marginTop: 9, textAlign: "center" }, readyText: { color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 14, lineHeight: 21, maxWidth: 310, textAlign: "center", marginTop: 12 },
   cueCard: { width: "100%", borderRadius: 22, paddingVertical: 20, paddingHorizontal: 22, backgroundColor: SPACE_CADET.surface1, marginTop: 36, gap: 9 }, cueLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 10, letterSpacing: 1.6, textAlign: "center", marginBottom: 6 },
   legendRow: { flexDirection: "row", alignItems: "baseline" }, legendGate: { width: 64, color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 11, letterSpacing: 1.3 }, legendText: { flex: 1, color: SPACE_CADET.textSecondary, fontFamily: "Gontserrat-Regular", fontSize: 13 },
   beginPrompt: { marginTop: 40, textAlign: "center" },
-  playScreen: { flex: 1, paddingHorizontal: 20, paddingBottom: 40 }, statusRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 16 }, statusRight: { alignItems: "flex-end" }, statusLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 1.5 }, statusValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 28, marginTop: 3 }, statusTotal: { color: SPACE_CADET.textTertiary, fontSize: 18 },
+  playScreen: { flex: 1, paddingHorizontal: 20, paddingBottom: 40 }, statusRow: { flexDirection: "row", alignItems: "flex-start", marginTop: 16 }, statusColumn: { width: 84 }, statusRight: { alignItems: "flex-end" }, stageTag: { flex: 1, alignItems: "center", justifyContent: "center", paddingTop: 2 }, stageGates: { color: ACCENT, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 1.3, marginTop: 6 }, statusLabel: { color: SPACE_CADET.textTertiary, fontFamily: "Gontserrat-SemiBold", fontSize: 9, letterSpacing: 1.5 }, statusValue: { color: SPACE_CADET.white, fontFamily: "Garet-Book", fontSize: 28, marginTop: 3 }, statusTotal: { color: SPACE_CADET.textTertiary, fontSize: 18 },
   boardArea: { flex: 1, marginTop: 12 },
   gate: { position: "absolute", width: GATE_W, height: GATE_H, borderRadius: 11, borderWidth: 1, alignItems: "center", justifyContent: "center", shadowColor: ACCENT, shadowRadius: 18, shadowOffset: { width: 0, height: 0 } },
   gateMissing: { borderStyle: "dashed", borderColor: ACCENT, backgroundColor: SPACE_CADET.black }, gateWrong: { borderColor: ERROR }, gateCorrect: { borderColor: SUCCESS },

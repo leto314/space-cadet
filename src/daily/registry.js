@@ -1,15 +1,19 @@
 import { AirwaysGame } from "../games/airways/AirwaysGame";
+import { CircuitsGame } from "../games/circuits/CircuitsGame";
 import { ContinuousTotalGame } from "../games/continuous-total/ContinuousTotalGame";
 import { CubeNetsGame } from "../games/cube-nets/CubeNetsGame";
 import { EstimationGame } from "../games/estimation/EstimationGame";
+import { LandingOrderGame } from "../games/landing-order/LandingOrderGame";
 import { MemorySpanGame } from "../games/memory-span/MemorySpanGame";
 import { MentalMathGame } from "../games/mental-math/MentalMathGame";
 import { MultitaskingGame } from "../games/multitasking/MultitaskingGame";
 import { NBackGame } from "../games/n-back/NBackGame";
+import { PatternMatrixGame } from "../games/pattern-matrix/PatternMatrixGame";
 import { ReactionTimeGame } from "../games/reaction-time/ReactionTimeGame";
 import { SelectiveAttentionGame } from "../games/selective-attention/SelectiveAttentionGame";
 import { SpatialBeaconGame } from "../games/spatial-beacon/SpatialBeaconGame";
 import { DailyCubeRotation } from "../games/spatial-orientation/DailyCubeRotation";
+import { SwitchboardGame } from "../games/switchboard/SwitchboardGame";
 import { SymbolRadarGame } from "../games/symbol-radar/SymbolRadarGame";
 import { TurnCountGame } from "../games/turn-count/TurnCountGame";
 import { VisualGridMemoryGame } from "../games/visual-grid-memory/VisualGridMemoryGame";
@@ -162,6 +166,42 @@ export const DAILY_GAMES = {
     progression: "Three ladders for everyone, each starting at three cells and gaining one cell per success until a mistake: a plain 4 × 4 grid, then a 5 × 5 grid recalled in order or seen through decoy patterns (depending on the day), then a 5 × 5 grid that turns a quarter before recall or a 6 × 6 grid recalled in order (depending on the day).",
     rules: "Memorize the highlighted cells, then find them again on the empty grid. Each ladder starts at three cells and adds one at every success; the first mistake ends it. A ladder is worth about a third of the points, in full at eight cells on the plain grid, seven through decoys or when the grid turns, six when the order matters.",
     Component: ({ seed, onFinish, onExit }) => <VisualGridMemoryGame daily={{ seed, onFinish, onExit }} />,
+  },
+  switchboard: {
+    competence: "logic",
+    title: "Switchboard",
+    summary: "5 panels, shown to hidden",
+    levels: null,
+    progression: "Five panels for everyone, harder as they go: two with the wiring shown (3 lights and 3 switches, then 4 and 4), then three with it hidden (4 lights and 3 switches, 4 and 4, then 5 and 4). A hidden wiring is revealed once you have pressed twice the shortest route. Each panel has a move budget: the shortest route, plus those discovery moves when the wiring is hidden.",
+    rules: "Each switch is wired to the lights: it toggles some of them, swaps two, shifts the whole row or copies one light onto another. Work out what every switch does, then reproduce the target pattern. Five panels, the wiring shown on the first two and hidden after; a hidden wiring is revealed once you have pressed twice the shortest route. A panel is worth up to 200 points: all of them when solved within its move budget (the shortest route, plus the moves before the reveal when the wiring is hidden), fewer for every extra move, a quarter for a solve at the move limit (twice the budget plus two), and nothing when the limit is reached first. Resets are free.",
+    Component: ({ seed, onFinish, onExit }) => <SwitchboardGame daily={{ seed, onFinish, onExit }} />,
+  },
+  "landing-order": {
+    competence: "logic",
+    title: "Landing Order",
+    summary: "8 scenarios, 3 to 6 aircraft",
+    levels: null,
+    progression: "Eight scenarios for everyone, more aircraft as they go: six with the briefing on screen (3, 4, 4, 5, 5 then 6 aircraft), then two to memorise before the question appears (4, then 5 aircraft).",
+    rules: "Each scenario gives a few clues about the order in which aircraft land, then asks a single question. Every clue is needed, and exactly one answer fits. Eight scenarios, from 3 to 6 aircraft; in the last two the briefing disappears before the question, so memorise it first. 125 points per right answer.",
+    Component: ({ seed, onFinish, onExit }) => <LandingOrderGame daily={{ seed, onFinish, onExit }} />,
+  },
+  "pattern-matrix": {
+    competence: "logic",
+    title: "Pattern Matrix",
+    summary: "8 matrices, easy to hard",
+    levels: null,
+    progression: "Eight matrices for everyone, easy to hard: three easy (one rule per row, four options), three medium (two rules at once, split and nested layouts, four options then six), then two hard (three rules at once, additions and overlays, six options).",
+    rules: "Along each row of the matrix, shapes, sizes, fills, counts or positions change according to hidden rules. Work out the rules and pick the panel that completes the matrix. Eight matrices, easy to hard, with four options then six. 125 points per right answer.",
+    Component: ({ seed, onFinish, onExit }) => <PatternMatrixGame daily={{ seed, onFinish, onExit }} />,
+  },
+  circuits: {
+    competence: "logic",
+    title: "Circuits",
+    summary: "6 circuits, every mode",
+    levels: null,
+    progression: "Six circuits for everyone, bigger boards and more gates as they go: predict the bulbs with AND, OR and NOT on three switches, find the missing gate, predict with XOR on four switches, find the missing gate among all seven, then set the switches: four switches with XOR, five with all seven gates.",
+    rules: "Current flows up from the switches, through the logic gates, to the bulbs. AND passes current when both inputs are on, OR when at least one is, NOT inverts its input, XOR passes when exactly one input is on; NAND, NOR and XNOR are their inverted versions. Six circuits, harder as you go. Predicting the bulbs or finding the missing gate is all or nothing, up to 167 points each. Setting the switches earns the full points within the flip budget (the fewest flips that work, plus one), fewer for every extra flip, a quarter for a solve at the flip limit (the minimum plus two flips per switch), and nothing when the limit is reached first.",
+    Component: ({ seed, onFinish, onExit }) => <CircuitsGame daily={{ seed, onFinish, onExit }} />,
   },
   airways: {
     competence: "multitasking",

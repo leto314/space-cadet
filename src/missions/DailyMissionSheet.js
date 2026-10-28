@@ -6,26 +6,17 @@ import Animated, { clamp, Easing, interpolate, runOnJS, useAnimatedStyle, useSha
 import { PressScaleButton } from "../components/GameSetupShell";
 import { CATEGORY_COLORS, getCategoryLabel, SPACE_CADET } from "../theme/spaceCadet";
 import { triggerSelectionHaptic } from "../utils/haptics";
-import { createRandom, dailySeed, deriveSeed, missionDay, randomTools } from "../utils/random";
+import { deriveSeed, missionDay } from "../utils/random";
 import { syncTrustedTime, trustedNow } from "../utils/trustedTime";
-import { competenceShares, generateMission } from "./generator";
+import { competenceShares, missionForDay } from "./generator";
 import { formatClock } from "./kit";
 import { CompetenceLine } from "./MissionModeScreen";
 import { MissionScreen } from "./MissionScreen";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-// Two lengths of the same mission. The exact duration changes from day to day (same for everyone).
-const FORMATS = [
-  { key: "short", label: "SHORT", minSeconds: 120, maxSeconds: 180 },
-  { key: "regular", label: "REGULAR", minSeconds: 300, maxSeconds: 420 },
-];
-
-function missionOfTheDay(day) {
-  const seed = dailySeed(day.key);
-  const rnd = randomTools(createRandom(deriveSeed(seed, "durations")));
-  const durations = Object.fromEntries(FORMATS.map((format) => [format.key, rnd.int(format.minSeconds / 30, format.maxSeconds / 30) * 30000]));
-  return { seed, moduleIds: generateMission(seed).moduleIds, durations };
-}
+// Two lengths of the same mission (see FORMATS in generator.js: the duration depends on the number of systems
+// and changes a little from day to day).
+const FORMATS = [{ key: "short", label: "SHORT" }, { key: "regular", label: "REGULAR" }];
 
 // The Daily Missions card opens this sheet, like Full Clearance: a short summary that slides up from the bottom
 // (day, competence line, length, start) and can be pulled up to full screen, where the same content gets more
@@ -40,7 +31,8 @@ export function DailyMissionSheet({ onClose }) {
   const [expanded, setExpanded] = useState(false);
   const sheetY = useSharedValue(height);
   const dragOrigin = useSharedValue(collapsedOffset);
-  const mission = useMemo(() => (day ? missionOfTheDay(day) : null), [day]);
+  // The mission of the day, with its memory of the days before it (rebuilt, not stored: the same on every phone).
+  const mission = useMemo(() => (day ? missionForDay(day.key) : null), [day]);
 
   useEffect(() => { sheetY.value = withTiming(collapsedOffset, { duration: 360, easing: Easing.out(Easing.cubic) }); }, [collapsedOffset, sheetY]);
   useEffect(() => { void resolveDay(); }, []);
@@ -66,6 +58,9 @@ export function DailyMissionSheet({ onClose }) {
       kicker: "DAILY MISSION",
       label: `${MONTHS[day.month].slice(0, 3).toUpperCase()} ${day.day}`,
       progressive: true,
+      source: "daily",
+      dayKey: day.key,
+      format,
     });
   }
 

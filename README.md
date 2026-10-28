@@ -2,7 +2,7 @@
 
 ![Expo SDK 58](https://img.shields.io/badge/Expo_SDK-58-000020?style=flat-square&logo=expo&logoColor=white)
 ![React Native 0.88](https://img.shields.io/badge/React_Native-0.88-20232A?style=flat-square&logo=react&logoColor=61DAFB)
-![Daily games 16 of 20](https://img.shields.io/badge/daily_games-16_of_20-4C8DFF?style=flat-square)
+![Daily games 20 of 20](https://img.shields.io/badge/daily_games-20_of_20-4C8DFF?style=flat-square)
 ![Private](https://img.shields.io/badge/repository-private-555555?style=flat-square)
 
 A cognitive training app for future pilots and astronauts. Six competences, trained a few minutes a day:
@@ -26,10 +26,11 @@ A cognitive training app for future pilots and astronauts. Six competences, trai
 - **Home** — the Cadet Score, the three training cards (Daily Training, Daily Missions, Full Clearance), today's
   progress, streak, ranking and the week at a glance.
 - **Daily Training** — one game per competence each day, the same for everyone (seeded from the date). Each daily
-  game scores 0–1000 and updates that competence's score. *In progress: every game but the four Logic ones has
-  its daily version (16 of 20), shown on a test screen; Logic is next.*
+  game scores 0–1000 and updates that competence's score. *Every game now has its daily version (20 of 20), shown
+  on a test screen.*
 - **Daily Missions** — several "systems" (modules) on one screen at the same time, like a cockpit. Generated each
-  day from the date, Short (2–3 min) or Regular (5–7 min), with systems introduced one by one.
+  day from the date with a memory of the days before (the systems rotate, every competence comes back within
+  three days), Short (2–3 min) or Regular (5–6 min), with systems introduced one by one.
 - **Full Clearance** — every game with free settings, plus **Mission Mode** (fly an archive mission or compose one
   from any modules).
 - **Statistics** — a live radar of the six competences (shader-rendered), period comparison, totals, rankings and
@@ -54,10 +55,10 @@ A cognitive training app for future pilots and astronauts. Six competences, trai
 | 13 | Airways | ![Multitasking](https://img.shields.io/badge/Multitasking-FFAD1F?style=flat-square) | ✓ 90 seconds, slow to fast |
 | 14 | Estimation | ![Mental Math](https://img.shields.io/badge/Mental_Math-C46BFF?style=flat-square) | ✓ 12 estimates, every kind |
 | 15 | Visual Scan | ![Attention](https://img.shields.io/badge/Attention-D81E5B?style=flat-square) | ✓ 3 grids, 3 × 3 to 5 × 5 |
-| 16 | Switchboard | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=flat-square) | *next* |
-| 17 | Landing Order | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=flat-square) | *next* |
-| 18 | Pattern Matrix | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=flat-square) | *next* |
-| 19 | Circuits | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=flat-square) | *next* |
+| 16 | Switchboard | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=flat-square) | ✓ 5 panels, shown to hidden |
+| 17 | Landing Order | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=flat-square) | ✓ 8 scenarios, 3 to 6 aircraft |
+| 18 | Pattern Matrix | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=flat-square) | ✓ 8 matrices, easy to hard |
+| 19 | Circuits | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=flat-square) | ✓ 6 circuits, every mode |
 | 20 | Cube Nets | ![Spatial](https://img.shields.io/badge/Spatial-4C8DFF?style=flat-square) | ✓ 8 puzzles, easy to hard |
 
 The list lives in `src/data/exercises.js`; daily versions are registered in `src/daily/registry.js`.
@@ -78,6 +79,13 @@ them — see [`scripts/games/README.md`](scripts/games/README.md).
 tracking, rotation match, quick estimate…), each declaring its competences, task type (continuous control /
 respond to events / when you have time), voice use, load and blocks. They are placed on a 4 × 8 half-block grid by
 `src/missions/layout.js` and picked by `src/missions/generator.js`.
+
+Each module is split like a game: `src/missions/modules/<module>/logic.js` (its spec, the content it shows from the
+mission's seed, its scoring) and the screen next to it; `modules/specs.js` is the pure catalogue the generator
+reads, and `score.js` weighs the modules' performances into the mission's score (by load). Two checks cover this:
+`npm run check:modules` for the structure (see [`scripts/check-module-separation.md`](scripts/check-module-separation.md))
+and `npm run test:missions` for the logic of the board, the generator and each module (see
+[`scripts/missions/README.md`](scripts/missions/README.md), including the open calibration decisions).
 
 ---
 
@@ -111,7 +119,8 @@ src/
   utils/                  seeded randomness, trusted server time, voice, audio, haptics
   hooks/, data/           screen transitions, the exercise list
   assets/                 fonts, animated icons, logo, sounds
-scripts/                  checks runnable with plain Node (no install): check-game-separation.mjs, games/ tests
+scripts/                  checks runnable with plain Node (no install): the two separation checks, games/ and
+                          missions/ logic tests
 ```
 
 ## Key ideas

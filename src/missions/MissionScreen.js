@@ -4,6 +4,8 @@ import { BlurView } from "expo-blur";
 import Animated, { FadeIn, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 
 import { PulsingPrompt } from "../components/PulsingPrompt";
+import { missionRecord } from "../stats/records";
+import { saveMission } from "../stats/storage";
 import { CATEGORY_COLORS, getCategoryLabel, SPACE_CADET } from "../theme/spaceCadet";
 import { triggerSelectionHaptic, triggerSuccessHaptic } from "../utils/haptics";
 import { deriveSeed } from "../utils/random";
@@ -11,6 +13,7 @@ import { endVoiceSession, speak, startVoiceSession, stopSpeaking } from "../util
 import { BLOCK_GAP, boardMetrics, cellRect, planLayout } from "./layout";
 import { formatClock } from "./kit";
 import { MODULES, TASK_LABELS } from "./modules";
+import { missionScore } from "./score";
 
 const PROMPT_AUTO_SKIP_MS = 30000;
 // Progressive missions bring the systems in one at a time. The next one arrives 10 s after the previous one, or,
@@ -38,9 +41,9 @@ function ModuleLayer({ opacity, interactive, onTop, appear = false, onTouch, chi
   return <Animated.View pointerEvents={interactive ? "box-none" : "none"} onStartShouldSetResponderCapture={() => { onTouch?.(); return false; }} style={[StyleSheet.absoluteFill, onTop && styles.onTop, style]}>{children}</Animated.View>;
 }
 
-// Flies one mission ({ moduleIds, durationMs, seed, kicker, label, progressive }): briefing module by module,
-// launch, the flight itself (pause, keypad prompts, progressive arrival of the systems), then the debrief. Opened by
-// the Daily Mission sheet and by Mission Mode.
+// Flies one mission ({ moduleIds, durationMs, seed, kicker, label, progressive, source, dayKey, format }): briefing
+// module by module, launch, the flight itself (pause, keypad prompts, progressive arrival of the systems), then
+// the debrief, which is recorded (stats/storage.js). Opened by the Daily Mission sheet and by Mission Mode.
 export function MissionScreen({ onClose, mission }) {
   const durationMs = mission.durationMs;
   const modules = useMemo(() => mission.moduleIds.map((id) => MODULES[id]), [mission.moduleIds]);
@@ -188,17 +191,21 @@ export function MissionScreen({ onClose, mission }) {
     else setPromptEntry((entry) => `${entry}${key}`.slice(0, 4));
   }
 
+  // The debrief: each flown module reports its result, the mission logic weighs them into the score, and the
+  // flight is recorded.
   function finish() {
     if (finished.current) return;
     finished.current = true;
     endVoiceSession();
     const flown = progressive ? modules.filter((module) => activationsRef.current[module.id] !== undefined) : modules;
-    const perModule = flown.map((module) => ({ module, ...(registry.current[module.id]?.() ?? { performance: 0, detail: "" }) }));
-    const score = Math.round((perModule.reduce((sum, entry) => sum + entry.performance, 0) / perModule.length) * 1000);
+    const reported = flown.map((module) => ({ id: module.id, ...(registry.current[module.id]?.() ?? { performance: 0, detail: "" }) }));
+    const { score, modules: lines } = missionScore(reported);
+    const perModule = lines.map((line) => ({ module: MODULES[line.id], ...line }));
     setStatus("ended");
     setResults({ score, perModule });
     setPhase("results");
     void triggerSuccessHaptic();
+    void saveMission(missionRecord({ source: mission.source ?? "mode", dayKey: mission.dayKey ?? null, format: mission.format ?? null, seed, moduleIds: flown.map((module) => module.id), durationMs, progressive, startedAt: startedAt.current, endedAt: Date.now(), score, modules: lines.map((line) => ({ moduleId: line.id, competence: line.competence, share: line.share, performance: line.performance, points: line.points, metrics: { detail: line.detail } })) }));
   }
   function replay() {
     registry.current = {};

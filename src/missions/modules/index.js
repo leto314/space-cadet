@@ -1,29 +1,26 @@
-import { airwaysModule } from "./AirwaysModule";
-import { altitudeModule } from "./AltitudeModule";
-import { anomalyLiteModule, anomalyModule } from "./AnomalyModule";
-import { codesModule, codesVoiceModule } from "./CodesModule";
-import { cubeModule } from "./CubeModule";
-import { estimationModule } from "./EstimationModule";
-import { miniMemoryModule, miniScanModule } from "./GridModules";
-import { headingModule } from "./HeadingModule";
-import { logicGatesModule } from "./LogicGatesModule";
-import { miniLandingModule, miniLandingSplitModule, miniSwitchboardModule } from "./LogicPuzzleModules";
-import { mathCheckModule } from "./MathCheckModule";
-import { radioCallsignModule, radioModule } from "./RadioModule";
-import { runningTotalModule } from "./RunningTotalModule";
-import { oppositeFaceModule, rotationMatchModule } from "./SpatialModules";
-import { systemLightsModule } from "./SystemLightsModule";
-import { tanksModule } from "./TanksModule";
-import { trackingMiniModule, trackingModule } from "./TrackingModule";
+import { airwaysModule } from "./airways/AirwaysModule";
+import { altitudeModule } from "./altitude/AltitudeModule";
+import { anomalyLiteModule, anomalyModule } from "./anomaly/AnomalyModule";
+import { codesModule, codesVoiceModule } from "./codes/CodesModule";
+import { cubeModule } from "./cube/CubeModule";
+import { estimationModule } from "./estimation/EstimationModule";
+import { miniMemoryModule, miniScanModule } from "./grids/GridModules";
+import { headingModule } from "./heading/HeadingModule";
+import { logicGatesModule } from "./logic-gates/LogicGatesModule";
+import { miniLandingModule, miniLandingSplitModule, miniSwitchboardModule } from "./logic-puzzles/LogicPuzzleModules";
+import { mathCheckModule } from "./math-check/MathCheckModule";
+import { radioCallsignModule, radioModule } from "./radio/RadioModule";
+import { runningTotalModule } from "./running-total/RunningTotalModule";
+import { oppositeFaceModule, rotationMatchModule } from "./spatial/SpatialModules";
+import { systemLightsModule } from "./system-lights/SystemLightsModule";
+import { tanksModule } from "./tanks/TanksModule";
+import { trackingMiniModule, trackingModule } from "./tracking/TrackingModule";
 
-// Every module declares what it asks of the player, which is what the mission generator will budget against:
-// - competence / secondary: which of the six categories it trains (primary drives its colour)
-// - task: "continuous" (needs constant control), "event" (react when something happens), "opportunistic" (do it
-//   whenever there is a spare moment; more is better)
-// - voice: whether it speaks instructions (only one talking module can run at a time)
-// - load: rough attention cost, to be tuned by playtesting
-// - blocks: its display and control blocks, in half-block cells ({ h, w }); role "display" goes top-left,
-//   anything else is a control and goes bottom-right
+export { TASK_LABELS } from "./specs";
+
+// Every module on the board: its spec (see specs.js, the pure catalogue the generator reads) plus the React
+// component that shows it. Each module lives in its own folder, split in logic.js (spec, content from the seed,
+// scoring) and <Name>Module.js (the screen).
 export const MODULES = {
   [altitudeModule.id]: altitudeModule,
   [mathCheckModule.id]: mathCheckModule,
@@ -51,5 +48,3 @@ export const MODULES = {
   [oppositeFaceModule.id]: oppositeFaceModule,
   [miniMemoryModule.id]: miniMemoryModule,
 };
-
-export const TASK_LABELS = { continuous: "CONTINUOUS CONTROL", event: "RESPOND TO EVENTS", opportunistic: "WHEN YOU HAVE TIME" };

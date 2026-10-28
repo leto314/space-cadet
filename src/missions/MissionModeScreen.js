@@ -5,7 +5,8 @@ import Animated, { FadeIn } from "react-native-reanimated";
 import { PickerSetting, PressScaleButton } from "../components/GameSetupShell";
 import { CATEGORY_COLORS, CATEGORY_CONFIG, getCategoryLabel, SPACE_CADET } from "../theme/spaceCadet";
 import { triggerSelectionHaptic } from "../utils/haptics";
-import { briefingOrder, competenceShares, missionProblem, randomArchiveMission } from "./generator";
+import { randomSeed } from "../utils/random";
+import { archiveMission, briefingOrder, competenceShares, missionProblem } from "./generator";
 import { MissionScreen } from "./MissionScreen";
 import { MODULES, TASK_LABELS } from "./modules";
 
@@ -41,7 +42,7 @@ export function MissionModeScreen({ onExit }) {
 
   function generate() {
     void triggerSelectionHaptic();
-    const mission = randomArchiveMission();
+    const mission = archiveMission(randomSeed());
     setGenerated(mission);
     setSelection(mission.moduleIds);
   }
@@ -56,9 +57,10 @@ export function MissionModeScreen({ onExit }) {
       key: Date.now(),
       moduleIds: briefingOrder(selection),
       durationMs: minutes * 60000,
-      seed: isGenerated ? generated.seed : Math.floor(Math.random() * 0xffffffff),
+      seed: isGenerated ? generated.seed : randomSeed(),
       kicker: "MISSION MODE",
       progressive,
+      source: "mode",
       label: isGenerated ? `${MONTHS[generated.day.month]} ${generated.day.day}, ${generated.day.year}` : "CUSTOM",
     });
   }

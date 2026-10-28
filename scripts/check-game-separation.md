@@ -24,7 +24,6 @@ free session) and hand it to the logic, which turns it into a generator. Same se
 From the project folder, with Node 20 or newer. Nothing to install (no `npm install` needed).
 
 ```bash
-cd /workspace/space-cadet
 node scripts/check-game-separation.mjs              # games with a daily version, PASS / FAIL per game (default)
 node scripts/check-game-separation.mjs --details    # same, plus what is wrong in each failing game (file, line)
 node scripts/check-game-separation.mjs --all        # every game, including those without a daily version yet
@@ -42,7 +41,7 @@ SPATIAL ORIENTATION                              PASS
   06 Heading and Beacon       FAIL  (2 issues)
   ...
 GENERAL
-  1 OF 11 FINISHED GAMES FAIL THE TEST  (Heading and Beacon)
+  1 OF 20 FINISHED GAMES FAIL THE TEST  (Heading and Beacon)
 ```
 
 A game "has a daily version" when it is registered in `src/daily/registry.js`. Those must pass. The others are
@@ -87,10 +86,11 @@ Notes:
 | Behavioural equivalence | the check says nothing about whether a split changed the game | a moved function with an edited constant | comparing old vs. new output over several seeds (done by hand for each split so far) |
 | It does not run the app | `node_modules` is not needed, so nothing is executed but the logic files | a runtime error in a screen | a manual run of the game |
 
-## Try it: three ways to make it fail on purpose
+## Try it: five ways to make it fail on purpose
 
 Each example is a one-line change. Make it, run the check (with `--details` to see the message), then undo it.
-All three use Turn Count, whose files are `src/games/turn-count/logic.js` and `src/games/turn-count/TurnCountGame.js`.
+The first three use Turn Count, whose files are `src/games/turn-count/logic.js` and
+`src/games/turn-count/TurnCountGame.js`; the last two use the Logic games.
 
 **1. A screen that draws its own random numbers (rule 2a).**
 In `TurnCountGame.js`, find the line
@@ -124,6 +124,29 @@ export function directionName(direction) { return direction === "R" ? "RIGHT" : 
 Run the check: Turn Count fails with `TurnCountGame.js: exports "directionName" (line N), which is not a React
 component; logic must be exported from logic.js`.
 
-In all three cases the competence line (`SPATIAL ORIENTATION`) turns to `FAIL`, the `GENERAL` line reads
-`1 OF 11 FINISHED GAMES FAIL THE TEST (Turn Count)`, and the exit code is 1. Undo the change and everything is
+**4. A logic game that stops being reproducible (rule 3c).**
+`src/games/switchboard/logic.js` builds the day's panels from the seed it is given. Find
+
+```js
+export function buildPanel({ lightCount, switchCount }, random) {
+```
+
+and give the generator a fallback of its own: `random = Math.random`. The code still runs - every caller passes a
+seeded generator - but the door is open for the next one. Run the check: Switchboard fails with
+`logic.js: calls Math.random (line N); generators must receive their random source as a parameter`, the `LOGIC`
+line turns to `FAIL` and `GENERAL` reads `1 OF 20 FINISHED GAMES FAIL THE TEST (Switchboard)`.
+
+**5. A helper exported from a logic game's screen (rule 2d).**
+In `src/games/pattern-matrix/PatternMatrixGame.js`, find
+
+```js
+function formatSeconds(ms) { return (ms / 1000).toFixed(1); }
+```
+
+and put `export ` in front of it (as if a mission module wanted to reuse it). The check reports
+`PatternMatrixGame.js: exports "formatSeconds" (line N), which is not a React component; logic must be exported
+from logic.js`: shared helpers belong to `logic.js`, which the mission modules already import from several games.
+
+In the first three cases the competence line (`SPATIAL ORIENTATION`) turns to `FAIL`, the `GENERAL` line reads
+`1 OF 20 FINISHED GAMES FAIL THE TEST (Turn Count)`, and the exit code is 1. Undo the change and everything is
 `PASS` again.
