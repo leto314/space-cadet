@@ -3,7 +3,7 @@ import { StyleSheet } from "react-native";
 import { GLView } from "expo-gl";
 
 // The progress curve of a game's setup screen, drawn by a shader in the same spirit as the statistics radar
-// (RadarOrb): a bright line with a soft glow, a fading area under it, a light that travels along the curve, and
+// (RadarGlow): a bright line with a soft glow, a fading area under it, a light that travels along the curve, and
 // the latest result pulsing at the end.
 const MAX_POINTS = 16;
 

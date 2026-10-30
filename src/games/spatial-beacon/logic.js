@@ -2,7 +2,7 @@
 // geometry, the daily progression and the scores. Every generator takes `random` (a Math.random-like function,
 // see utils/random.js) so the same seed always gives the same trials.
 
-import { createRandom } from "../../utils/random.js";
+import { createRandom, drawFresh } from "../../utils/random.js";
 
 export const DEFAULT_ROUNDS = 10;
 export const HEADING_ANGLES = Array.from({ length: 24 }, (_, index) => index * 15);
@@ -69,17 +69,22 @@ export function buildTrial(mode, random) {
   return { mode, ...(mode === "easy" ? buildEasyTrial(random) : buildSpatialTrial(random, mode === "hard")) };
 }
 
-// A Full Clearance session from a seed: `roundCount` trials of one mode.
+// What makes two trials the same question: the heading to read, and for a placement, where the beacon is.
+export const trialKey = (trial) => trial.mode === "easy" ? `${trial.mode} ${trial.heading}` : `${trial.mode} ${trial.heading} ${trial.answerAngle}`;
+
+// A Full Clearance session from a seed: `roundCount` trials of one mode, never the same one twice.
 export function buildSession({ mode, roundCount }, seed) {
   const random = createRandom(seed);
-  return Array.from({ length: roundCount }, () => buildTrial(mode, random));
+  const asked = new Set();
+  return Array.from({ length: roundCount }, () => drawFresh(() => buildTrial(mode, random), trialKey, asked));
 }
 
 // Daily training: the same ten rounds for everyone, in three stages of growing difficulty.
 export const DAILY_STAGES = [{ mode: "easy", rounds: 3 }, { mode: "medium", rounds: 3 }, { mode: "hard", rounds: 4 }];
 export function buildDailyTrials(seed) {
   const random = createRandom(seed);
-  return DAILY_STAGES.flatMap((stage) => Array.from({ length: stage.rounds }, () => buildTrial(stage.mode, random)));
+  const asked = new Set();
+  return DAILY_STAGES.flatMap((stage) => Array.from({ length: stage.rounds }, () => drawFresh(() => buildTrial(stage.mode, random), trialKey, asked)));
 }
 
 // The matrix is 3 × 3 cells around the beacon, MATRIX_HALF points from its centre to its edge. A release counts

@@ -2,7 +2,7 @@
 // the accepted range, the daily progression and the results. Every generator takes `random` (a Math.random-like
 // function, see utils/random.js) so the same seed always gives the same estimates.
 
-import { createRandom, deriveSeed, randomTools } from "../../utils/random.js";
+import { createRandom, deriveSeed, drawFresh, randomTools } from "../../utils/random.js";
 
 export const TYPES = [
   { value: "all", label: "ALL" }, { value: "multiply", label: "PRODUCT" }, { value: "divide", label: "QUOTIENT" }, { value: "percent", label: "PERCENTAGE" },
@@ -37,12 +37,27 @@ export function estimatePoints(problem, answer) {
   return clamp(Math.round(100 * clamp(1 - (error - full) / (zero - full), 0, 1)), 0, 100);
 }
 
-// Daily training: twelve estimates for everyone, every type once plus three more, in a seeded order.
+// What makes two estimates the same question: the prompt for a calculation, the angle for an angle (whatever
+// its rotation), the products for a comparison (whichever side), the dots themselves for a count.
+export function problemKey(problem) {
+  if (problem.type === "angle") return `angle ${problem.angle}`;
+  if (problem.type === "points") return `dots ${JSON.stringify(problem.points)}`;
+  if (problem.type === "compare") return `compare ${[...problem.compareLabels].sort().join(" / ")}`;
+  return problem.prompt;
+}
+
+// Daily training: twelve estimates for everyone, every type once plus three more, in a seeded order, never the
+// same question twice (a repeat is drawn again from the next seed of its slot).
 export const DAILY_COUNT = 12;
 export function buildDailyProblems(seed) {
   const rnd = randomTools(createRandom(seed));
   const types = rnd.shuffle([...EXERCISE_TYPES, ...Array.from({ length: DAILY_COUNT - EXERCISE_TYPES.length }, () => rnd.item(EXERCISE_TYPES))]);
-  return types.map((type, index) => buildProblem([type], createRandom(deriveSeed(seed, `estimate-${index}`))));
+  const asked = new Set();
+  return types.map((type, index) => {
+    let attempt = 0;
+    const draw = () => buildProblem([type], createRandom(deriveSeed(seed, attempt++ === 0 ? `estimate-${index}` : `estimate-${index}:${attempt - 1}`)));
+    return drawFresh(draw, problemKey, asked);
+  });
 }
 
 function buildPoints(random) {
@@ -52,9 +67,9 @@ function buildPoints(random) {
   return { type: "points", title: "DOT COUNT", prompt: blueOnly ? "How many blue dots?" : "How many dots?", target: blueOnly ? points.filter((point) => point.blue).length : count, step: 1, tolerance: 0.35, points };
 }
 
-// The angle to estimate is exactly the one drawn (an arc marks it): from 25° to 315°, reflex angles included,
-// the figure turned by a random amount so the first ray is not always vertical.
-const ANGLES = [25, 35, 45, 55, 65, 75, 90, 105, 120, 135, 150, 165, 200, 215, 230, 245, 270, 290, 315];
+// The angle to estimate is exactly the one drawn (an arc marks it): any whole degree from 15° to 345°, reflex
+// angles included, the figure turned by a random amount so the first ray is not always vertical.
+export const ANGLES = Array.from({ length: 331 }, (_, index) => 15 + index);
 function buildAngle(random) {
   const angle = randomItem(random, ANGLES);
   const rotation = randomInt(random, 0, 359);
@@ -88,11 +103,12 @@ export function acceptedRange(problem) {
 }
 
 // A Full Clearance session: an endless stream of problems of the chosen types, from a seed, drawn one at a time
-// with `next()`. `types` may be ["all"].
+// with `next()`. `types` may be ["all"]. No question comes back until every possible one has been asked.
 export function createSession(types, seed) {
   const random = createRandom(seed);
   const pool = types.includes("all") ? EXERCISE_TYPES : types;
-  return { next: () => buildProblem(pool, random) };
+  const asked = new Set();
+  return { next: () => drawFresh(() => buildProblem(pool, random), problemKey, asked) };
 }
 
 // The day's twelve estimates, from the daily seed.

@@ -2,7 +2,7 @@
 // the results. Every generator takes `rnd` (the random tools of utils/random.js) so the same seed always gives
 // the same questions.
 
-import { createRandom, deriveSeed, randomTools } from "../../utils/random.js";
+import { createRandom, deriveSeed, drawFresh, randomTools } from "../../utils/random.js";
 
 export const OPS = [{ value: "+", label: "+", name: "addition" }, { value: "-", label: "−", name: "subtraction" }, { value: "×", label: "×", name: "multiplication" }, { value: "÷", label: "÷", name: "division" }];
 const MULTIPLIERS = [2, 2, 3, 4, 4, 5, 5, 6, 8, 9, 10, 10, 12, 15, 20, 25, 50];
@@ -48,27 +48,43 @@ export function buildProblem({ operations, operationCount, history }, rnd) {
   return { answer: total, expression, primaryOperation: first };
 }
 
-// The day's 25 questions, in order, each tagged with its stage.
+// What makes two questions the same: their first calculation, operands in order for + and ×. "14 × 12",
+// "12 × 14" and "(14 × 12) + 30" all start with the same calculation, so a session asks only one of them.
+const COMMUTATIVE = ["+", "×"];
+export function firstCalculation(expression) {
+  const [left, operation, right] = expression.replace(/[()]/g, "").split(" ");
+  const [a, b] = COMMUTATIVE.includes(operation) ? [left, right].sort((x, y) => Number(x) - Number(y)) : [left, right];
+  return `${a} ${operation} ${b}`;
+}
+const problemKey = (problem) => firstCalculation(problem.expression);
+
+// The day's 25 questions, in order, each tagged with its stage, never the same calculation twice.
 export function buildDailyProblems(seed) {
   const rnd = randomTools(createRandom(seed));
   const history = [];
+  const asked = new Set();
   return DAILY_STAGES.flatMap((stage, stageIndex) => Array.from({ length: stage.questions }, () => {
-    let problem;
-    // An "all signs" question must actually use a × or a ÷.
-    for (let attempt = 0; attempt < 12; attempt += 1) { problem = buildProblem({ operations: stage.operations, operationCount: stage.operationCount, history }, rnd); if (!stage.requireProduct || /[×÷]/.test(problem.expression)) break; }
+    const problem = drawFresh(() => {
+      let candidate;
+      // An "all signs" question must actually use a × or a ÷.
+      for (let attempt = 0; attempt < 12; attempt += 1) { candidate = buildProblem({ operations: stage.operations, operationCount: stage.operationCount, history }, rnd); if (!stage.requireProduct || /[×÷]/.test(candidate.expression)) break; }
+      return candidate;
+    }, problemKey, asked);
     history.push(problem.primaryOperation);
     return { ...problem, stage: stageIndex };
   }));
 }
 
 // A Full Clearance session: an endless stream of expressions from a seed, drawn one at a time with `next()`
-// (the last twelve first operations are remembered so the same sign does not come twice in a row).
+// (the last twelve first operations are remembered so the same sign does not come twice in a row, and no
+// calculation comes back until every possible one has been asked).
 export function createSession({ operations, operationCount }, seed) {
   const rnd = randomTools(createRandom(seed));
   let history = [];
+  const asked = new Set();
   return {
     next() {
-      const problem = buildProblem({ operations, operationCount, history }, rnd);
+      const problem = drawFresh(() => buildProblem({ operations, operationCount, history }, rnd), problemKey, asked);
       history = [...history, problem.primaryOperation].slice(-12);
       return problem;
     },

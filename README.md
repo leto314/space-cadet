@@ -3,7 +3,7 @@
 ![Expo SDK 58](https://img.shields.io/badge/Expo_SDK-58-000020?style=flat-square&logo=expo&logoColor=white)
 ![React Native 0.88](https://img.shields.io/badge/React_Native-0.88-20232A?style=flat-square&logo=react&logoColor=61DAFB)
 ![Daily games 20 of 20](https://img.shields.io/badge/daily_games-20_of_20-4C8DFF?style=flat-square)
-![Private](https://img.shields.io/badge/repository-private-555555?style=flat-square)
+![License MIT](https://img.shields.io/badge/license-MIT-555555?style=flat-square)
 
 A cognitive training app for future pilots and astronauts. Six competences, trained a few minutes a day:
 
@@ -16,7 +16,7 @@ A cognitive training app for future pilots and astronauts. Six competences, trai
 | ![Logic](https://img.shields.io/badge/Logic-5EEBEB?style=for-the-badge) | `#5EEBEB` cyan | deduction, rules, circuits |
 | ![Multitasking](https://img.shields.io/badge/Multitasking-FFAD1F?style=for-the-badge) | `#FFAD1F` orange | several systems at once |
 
-> **Status:** early development, private repository. Statistics are stored locally for testing; accounts and a
+> **Status:** early development. Statistics are stored locally for testing; accounts and a
 > backend (Supabase) come later.
 
 ---
@@ -67,7 +67,8 @@ Each game folder is split in two: `logic.js` (pure JavaScript: content generator
 result assembly — no React, loadable in plain Node) and the screen file(s) (`<Name>Game.js`, plus a separate
 `Daily…` component for Cube Rotation), which import `./logic`. Generators never call `Math.random`: they receive a
 seed (the day's seed, or `randomSeed()` for a free session), so any session can be rebuilt from its seed, and both
-modes share the same scoring functions (`roundPoints`, `gridPoints`, `estimatePoints`…).
+modes share the same scoring functions (`roundPoints`, `gridPoints`, `estimatePoints`…). Within a session a
+question is never asked twice (`drawFresh` in `src/utils/random.js`), checked by `scripts/games/no-repeats.test.mjs`.
 
 `node scripts/check-game-separation.mjs` verifies that split (`--details` to see what fails, `--all` to include
 the games without a daily version, `--help`). `npm run test:games` runs the logic tests of the games that have
@@ -143,11 +144,8 @@ react-native-svg · expo-speech / expo-audio · AsyncStorage.
 
 ## Credits
 
-- The statistics radar shader (`src/components/RadarOrb.js`) is adapted from the *Orb* component of
-  [React Bits](https://reactbits.dev) (MIT + Commons Clause).
 - Fonts and animated icons are freely available assets from their respective authors.
 
 ## License
 
-© 2026 — All rights reserved. This repository is private; no part of it may be copied, modified or distributed
-without the author's permission.
+[MIT](LICENSE) © 2026 Lev Tokaryev. Fonts and other third-party assets keep their own licenses.

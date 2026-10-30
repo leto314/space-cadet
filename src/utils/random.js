@@ -65,6 +65,19 @@ export function randomTools(random) {
   return { random, int, float, item, chance, shuffle };
 }
 
+// Draws a question that has not been asked yet in this session: calls `draw()` until `keyOf` gives a key not in
+// `seen` (the set of keys asked so far), records that key and returns the question. When every try comes back
+// already asked, the pool is used up: `seen` starts over from this question, so repeats only come once
+// everything has been asked. Draws only consume randomness when they are made, so a session without repeats is
+// exactly the one it was before.
+export function drawFresh(draw, keyOf, seen, attempts = 200) {
+  let item = draw();
+  for (let attempt = 1; attempt < attempts && seen.has(keyOf(item)); attempt += 1) item = draw();
+  if (seen.has(keyOf(item))) seen.clear();
+  seen.add(keyOf(item));
+  return item;
+}
+
 // A fresh seed for a free (Full Clearance) session: the one place where the app draws on Math.random. Games never
 // call Math.random themselves; they pass a seed to their logic, so any session can be rebuilt from its seed.
 export function randomSeed() {

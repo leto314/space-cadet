@@ -3,7 +3,7 @@
 // generator takes `random` (a Math.random-like function, see utils/random.js) so the same seed always gives
 // the same circuits.
 
-import { createRandom, deriveSeed, randomTools } from "../../utils/random.js";
+import { createRandom, deriveSeed, drawFresh, randomTools } from "../../utils/random.js";
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 export const MODE_CYCLE = ["gate", "inputs", "outputs"];
@@ -157,11 +157,19 @@ function circuitFromSeed({ mode, gateSet, inputCount = null }, seed, index) {
   return null;
 }
 
+// What makes two circuits the same question: the same mode, wiring, switch positions and target.
+export const circuitKey = (circuit) => (circuit ? JSON.stringify({ mode: circuit.mode, layers: circuit.layers, inputs: circuit.inputs, target: circuit.target }) : "none");
+
 // A Full Clearance session from a seed: `circuitCount` circuits in the chosen mode ("mixed" draws each
-// circuit's mode from the seed) with the chosen gate set.
+// circuit's mode from the seed) with the chosen gate set, never the same circuit twice.
 export function buildSession({ mode, circuitCount, gateSet }, seed) {
   const rnd = randomTools(createRandom(deriveSeed(seed, "modes")));
-  return Array.from({ length: circuitCount }, (_, index) => circuitFromSeed({ mode: mode === "mixed" ? rnd.item(MODE_CYCLE) : mode, gateSet }, seed, index)).filter(Boolean);
+  const asked = new Set();
+  return Array.from({ length: circuitCount }, (_, index) => {
+    const settings = { mode: mode === "mixed" ? rnd.item(MODE_CYCLE) : mode, gateSet };
+    let attempt = 0;
+    return drawFresh(() => circuitFromSeed(settings, seed, attempt++ === 0 ? index : `${index}:${attempt - 1}`), circuitKey, asked);
+  }).filter(Boolean);
 }
 
 // Flip budget of a switch-setting circuit. `par` is the fewest flips that light the target plus one for a

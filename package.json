@@ -2,6 +2,7 @@
   "name": "space-cadet",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "main": "index.js",
   "scripts": {
     "start": "expo start",

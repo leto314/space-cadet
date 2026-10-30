@@ -13,6 +13,14 @@ Order** (`landing-order.test.mjs`), **Pattern Matrix** (`pattern-matrix.test.mjs
 to the logic (its `GAMES` list names the games it covers; the Logic screens follow the same contract,
 `buildDailySession(daily.seed)` and `daily.onFinish(dailyResult(...))`, so they can be added to it).
 
+`no-repeats.test.mjs` covers eleven games at once: within one session, daily or Full Clearance, the same
+question never comes twice. What "the same question" means is set game by game in its `GAMES` list (in Flash
+Math, the first calculation: "14 × 12", "12 × 14" and "(14 × 12) + 30" are one question). The generators avoid
+repeats through `drawFresh` (`src/utils/random.js`), which draws again when a question was already asked; a
+small pool is used up before anything comes back. Games built on repetition
+(N-back, Reaction Time, Selective Attention, Anomaly Detection, Airways, Target Drift, Visual Memory) and Cube
+Rotation and Visual Scan are left out on purpose; the file's header says why.
+
 ## How to run
 
 From the project folder, Node 20 or newer, nothing to install:
@@ -181,5 +189,6 @@ deduce the answer.
 ## Adding a game
 
 Copy one of the two test files, point it at the new `logic.js`, and keep the same themes: determinism, variety,
-valid content, progression, score bounds and direction. Add the game to the `GAMES` list of `wiring.test.mjs`.
+valid content, progression, score bounds and direction. Add the game to the `GAMES` list of `wiring.test.mjs`,
+and, if its questions should never repeat in a session, to the `GAMES` list of `no-repeats.test.mjs`.
 The `helpers.mjs` file provides the seeds, `same`, `assertScore` and `fuzz`.

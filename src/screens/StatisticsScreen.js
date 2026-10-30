@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } fr
 import { BlurMask, Canvas, Circle, DashPathEffect, Group, Path, SweepGradient, vec } from "@shopify/react-native-skia";
 import Animated, { Extrapolation, interpolate, useAnimatedScrollHandler, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 
-import { RadarOrb } from "../components/RadarOrb";
+import { RadarGlow } from "../components/RadarGlow";
 import { CATEGORY_COLORS, SPACE_CADET } from "../theme/spaceCadet";
 import { triggerSelectionHaptic } from "../utils/haptics";
 
@@ -75,12 +75,12 @@ function Radar({ size, period, active }) {
   const sweep = <SweepGradient c={vec(center, middle)} colors={SWEEP_COLORS} origin={vec(center, middle)} transform={[{ rotate: -Math.PI / 2 }]} />;
 
   return <View style={{ width: size, height }}>
-    {LIVE_RADAR ? <RadarOrb values={current} colors={AXIS_COLORS} radiusShare={radius / size} active={active} /> : null}
+    {LIVE_RADAR ? <RadarGlow values={current} colors={AXIS_COLORS} radiusShare={radius / size} active={active} /> : null}
     <Canvas style={StyleSheet.absoluteFill}>
       {RINGS.map((ring) => <Path key={ring} path={polygonPath(AXES.map(() => ring), center, middle, radius)} style="stroke" strokeWidth={1} color={ring === 1 ? "rgba(255,255,255,0.13)" : "rgba(255,255,255,0.06)"} />)}
       {AXES.map((key, index) => <Path key={key} path={`M${center} ${middle} L${center + Math.cos(axisAngle(index)) * radius} ${middle + Math.sin(axisAngle(index)) * radius}`} style="stroke" strokeWidth={1} color="rgba(255,255,255,0.06)" />)}
 
-      {/* The body of the shape is the live shader underneath (RadarOrb). With LIVE_RADAR off, it is painted here
+      {/* The body of the shape is the live shader underneath (RadarGlow). With LIVE_RADAR off, it is painted here
           instead: a wide soft halo, a tinted body and a bright outline, all from the same rainbow. */}
       {LIVE_RADAR ? null : <>
         <Group opacity={0.5}><Path path={shape}>{sweep}<BlurMask blur={26} style="normal" /></Path></Group>
